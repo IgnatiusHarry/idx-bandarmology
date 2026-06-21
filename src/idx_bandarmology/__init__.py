@@ -3,7 +3,7 @@
 Modules
 -------
 config        : .env loading, watchlist, paths
-stockbit      : Stockbit (exodus.stockbit.com) client — broker flow & bandar detector
+broker_api    : broker-flow client and bandar detector parser
 prices        : yfinance client — OHLCV history for IDX tickers
 storage       : SQLite read/write helpers (the "pipeline" landing zone)
 pipeline      : orchestrates scrape -> clean -> store, for one run

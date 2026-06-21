@@ -10,7 +10,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv(*_args, **_kwargs) -> bool:
+        return False
 
 # Load .env from the project root regardless of current working directory
 # (so this works the same from a notebook in /notebooks or a script in /src).
@@ -27,7 +31,26 @@ for _d in (RAW_DIR, PROCESSED_DIR, DB_PATH.parent):
     _d.mkdir(parents=True, exist_ok=True)
 
 # ── secrets ───────────────────────────────────────────────────────────────
-STOCKBIT_TOKEN = os.environ.get("STOCKBIT_TOKEN", "").strip() or None
+def get_broker_api_token() -> str | None:
+    """Read the latest broker API token from `.env` / process env.
+
+    This is resolved at runtime so notebooks can pick up a newly added token
+    without depending on the import-time value cached in `config`.
+
+    `BROKER_API_TOKEN` is the public-facing name. `STOCKBIT_TOKEN` remains a
+    backward-compatible fallback for existing local setups.
+    """
+    load_dotenv(_ROOT / ".env")
+    token = (
+        os.environ.get("BROKER_API_TOKEN", "").strip()
+        or os.environ.get("STOCKBIT_TOKEN", "").strip()
+    )
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token or None
+
+
+BROKER_API_TOKEN = get_broker_api_token()
 
 # ── watchlist ─────────────────────────────────────────────────────────────
 # Start small on purpose — this is a starting point you search/curate by hand.

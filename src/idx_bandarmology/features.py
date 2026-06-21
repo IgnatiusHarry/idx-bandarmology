@@ -3,7 +3,7 @@ tidy feature table for analysis & modeling.
 
 Core idea for the hypothesis test ("does smart money flow affect price?"):
 for each (ticker, date) where we have a broker/bandar snapshot, compute the
-*forward* price return over the next N days, so we can ask "when bandar/foreign
+*forward* price return over the next N days, so we can ask "when bandar/asing
 accumulated today, did price actually go up afterwards?" — not just same-day
 correlation, which can be circular (heavy buying same day mechanically pushes
 price up).
@@ -44,6 +44,21 @@ def add_forward_returns(price_df: pd.DataFrame, horizons: tuple[int, ...] = (1, 
     return df
 
 
+def add_backward_returns(price_df: pd.DataFrame, horizons: tuple[int, ...] = (1, 3, 5, 10)) -> pd.DataFrame:
+    """Add backward (historical) close-to-close return columns: back_return_{h}d.
+
+    back_return_5d on row (ticker, date) = return from the close 5 trading
+    days earlier to today's close. This is immediately available on the latest
+    broker snapshot date, unlike forward returns which require future prices.
+    """
+    df = price_df.sort_values(["ticker", "date"]).copy()
+    for h in horizons:
+        df[f"back_return_{h}d"] = (
+            df["close"] / df.groupby("ticker")["close"].shift(h) - 1.0
+        )
+    return df
+
+
 def build_feature_table(tickers: list[str] | None = None,
                          horizons: tuple[int, ...] = (1, 3, 5, 10)) -> pd.DataFrame:
     """The main entry point: one tidy DataFrame, one row per (ticker, date)
@@ -63,6 +78,7 @@ def build_feature_table(tickers: list[str] | None = None,
 
     price_df = build_price_features(price_df)
     price_df = add_forward_returns(price_df, horizons=horizons)
+    price_df = add_backward_returns(price_df, horizons=horizons)
 
     if broker_df.empty:
         # Still useful (pure price analysis), but flag it clearly.
@@ -87,6 +103,8 @@ def build_feature_table(tickers: list[str] | None = None,
     score_map = {
         "STRONG_ACCUMULATION": 2, "ACCUMULATION": 1, "NEUTRAL": 0,
         "DISTRIBUTION": -1, "STRONG_DISTRIBUTION": -2,
+        "AKUMULASI_KUAT": 2, "AKUMULASI": 1, "NETRAL": 0,
+        "DISTRIBUSI": -1, "DISTRIBUSI_KUAT": -2,
         "NET_BUY": 1, "NET_SELL": -1,
     }
     merged["bandar_signal_score"] = merged["bandar_signal_score"].fillna(

@@ -1,192 +1,524 @@
-"""IDX Bandarmology dashboard — Streamlit.
+"""IDX Bandarmology dashboard.
 
 Run with:
     streamlit run dashboard/app.py
-
-Reads directly from the SQLite DB the pipeline writes to (data/db/bandarmology.sqlite).
-No separate "load" step needed — just run the pipeline at least once first
-(see notebooks/01_bandarmology_end_to_end.ipynb or `python -m idx_bandarmology.pipeline`).
 """
 
 from __future__ import annotations
 
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-# Make `src/` importable when run as `streamlit run dashboard/app.py` from repo root.
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 
-from idx_bandarmology import analysis, config, features, modeling, pipeline, storage  # noqa: E402
+from idx_bandarmology import analysis, config, features, pipeline, storage  # noqa: E402
 
-st.set_page_config(page_title="IDX Bandarmology", page_icon="📈", layout="wide")
 
-st.title("📈 IDX Bandarmology Dashboard")
+def format_signal(signal: str | None) -> str:
+    if not signal or pd.isna(signal):
+        return "-"
+    return str(signal).replace("_", " ").title()
+
+
+def format_rp(value: float | int | None) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    value = float(value)
+    sign = "-" if value < 0 else ""
+    value = abs(value)
+    if value >= 1e12:
+        return f"{sign}Rp {value / 1e12:.2f} T"
+    if value >= 1e9:
+        return f"{sign}Rp {value / 1e9:.2f} B"
+    if value >= 1e6:
+        return f"{sign}Rp {value / 1e6:.2f} M"
+    return f"{sign}Rp {value:,.0f}"
+
+
+def format_pct(value: float | int | None) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    return f"{float(value):+.2%}"
+
+
+def clean_signal_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    if "bandar_signal" in out:
+        out["bandar_signal"] = out["bandar_signal"].map(format_signal)
+    for col in ["foreign_net_broker", "local_net_broker", "total_value"]:
+        if col in out:
+            out[col] = out[col].map(format_rp)
+    return out
+
+
+def latest_price_moves(ticker_prices: pd.DataFrame) -> dict[str, float | None]:
+    if ticker_prices.empty:
+        return {"close": None, "return_1d": None, "return_5d": None, "return_10d": None}
+    prices = ticker_prices.sort_values("date").copy()
+    latest = prices.iloc[-1]
+    out: dict[str, float | None] = {"close": latest["close"], "return_1d": None, "return_5d": None, "return_10d": None}
+    for days in (1, 5, 10):
+        if len(prices) > days:
+            base = prices.iloc[-days - 1]["close"]
+            out[f"return_{days}d"] = latest["close"] / base - 1 if base else None
+    return out
+
+
+def focused_ticker_diagnosis(
+    ticker: str,
+    ticker_prices: pd.DataFrame,
+    ticker_flow: pd.DataFrame,
+    ticker_activity: pd.DataFrame,
+    scan_10d: pd.DataFrame,
+    lookback: int,
+) -> tuple[str, pd.DataFrame, pd.DataFrame]:
+    """Build the plain-language answer shown at the top of the dashboard."""
+    moves = latest_price_moves(ticker_prices)
+    recent_cutoff = ticker_activity["date"].max() - pd.Timedelta(days=lookback) if not ticker_activity.empty else None
+    recent_activity = ticker_activity[ticker_activity["date"] >= recent_cutoff].copy() if recent_cutoff is not None else pd.DataFrame()
+    if recent_activity.empty:
+        return (
+            f"{ticker}: broker detail is not available for the selected lookback window.",
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+    recent_net = (
+        recent_activity.groupby(["broker_code", "participant_type"])
+        .agg(
+            days=("date", "nunique"),
+            buy_value=("buy_value", "sum"),
+            sell_value=("sell_value", "sum"),
+            net_value=("net_value", "sum"),
+        )
+        .reset_index()
+        .sort_values("net_value", ascending=False)
+    )
+    top_accumulators = recent_net[recent_net["net_value"] > 0].head(8).copy()
+
+    model_rows = scan_10d[scan_10d["ticker"].eq(ticker)].copy() if "ticker" in scan_10d.columns else pd.DataFrame()
+    significant = model_rows[model_rows["significant"].eq(True)].copy() if not model_rows.empty else pd.DataFrame()
+    latest_flow = ticker_flow.sort_values("date").tail(1)
+    latest_signal = format_signal(latest_flow.iloc[0]["bandar_signal"]) if not latest_flow.empty else "-"
+
+    move_bits = []
+    if moves["return_5d"] is not None:
+        move_bits.append(f"5D {format_pct(moves['return_5d'])}")
+    if moves["return_10d"] is not None:
+        move_bits.append(f"10D {format_pct(moves['return_10d'])}")
+    move_text = ", ".join(move_bits) if move_bits else "recent return unavailable"
+
+    if significant.empty:
+        verdict = (
+            f"{ticker}: price move is {move_text}. Recent top accumulation exists, "
+            f"but the model has not found a statistically significant broker-specific pattern yet. "
+            f"Latest aggregate signal: {latest_signal}."
+        )
+    else:
+        best = significant.sort_values(["p_value_one_sided", "mean_fwd_return"], ascending=[True, False]).iloc[0]
+        verdict = (
+            f"{ticker}: price move is {move_text}. The stronger evidence is broker-specific accumulation, "
+            f"not only the aggregate bandar label. Best model row: broker {best['broker_code']} has "
+            f"{int(best['n_events'])} events, mean 10D forward return {format_pct(best['mean_fwd_return'])}, "
+            f"win rate {best['win_rate']:.0%}, p-value {best['p_value_one_sided']:.4f}. "
+            f"Latest aggregate signal: {latest_signal}."
+        )
+
+    return verdict, top_accumulators, significant
+
+
+st.set_page_config(page_title="IDX Bandarmology", layout="wide")
+
+st.title("IDX Bandarmology")
 st.caption(
-    "Smart-money tracking for IDX stocks — broker flow, bandar detector, and the hypothesis test "
-    "'does bandar/foreign accumulation predict a price increase?'. Data: Stockbit (broker/bandar) + yfinance (prices)."
+    "Daily broker-flow evidence, event-study outcomes, and broker-combination screening "
+    "from the local SQLite database."
 )
 
-# ── sidebar: controls ────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Controls")
-
-    all_tickers_in_db = sorted(storage.read_prices()["ticker"].unique().tolist()) if not storage.read_prices().empty else []
-    default_watchlist = config.WATCHLIST
+    st.header("Controls")
 
     watchlist_input = st.text_input(
-        "Watchlist (comma-separated)",
-        value=",".join(default_watchlist),
-        help="IDX tickers without .JK, e.g. BBCA,BBRI,GOTO",
+        "Watchlist",
+        value=",".join(config.WATCHLIST),
+        help="Comma-separated IDX tickers without .JK, for example BBCA,BBRI,GOTO.",
     )
-    watchlist = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
+    watchlist = [ticker.strip().upper() for ticker in watchlist_input.split(",") if ticker.strip()]
 
-    st.divider()
-    run_clicked = st.button("🔄 Run pipeline now", use_container_width=True)
-    if run_clicked:
-        with st.spinner("Fetching data from yfinance + Stockbit..."):
+    st.subheader("Data refresh")
+    if st.button("Run latest pipeline", use_container_width=True):
+        with st.spinner("Fetching latest prices and broker rows..."):
             result = pipeline.run(watchlist)
-        st.success(f"Done: {result['n_prices']} price rows, {result['n_broker']} broker_flow rows.")
+        st.success(
+            f"Stored {result['n_prices']} price rows, {result['n_broker']} broker-flow rows, "
+            f"and {result.get('n_activity', 0)} broker-activity rows."
+        )
         st.rerun()
 
-    st.divider()
-    horizon = st.selectbox("Forward return horizon", [1, 3, 5, 10], index=2,
-                            format_func=lambda d: f"{d} days")
-    target_col = f"fwd_return_{horizon}d"
+    default_end = date.today()
+    default_start = default_end - timedelta(days=90)
+    backfill_range = st.date_input(
+        "Historical backfill range",
+        value=(default_start, default_end),
+        help="Loads historical market-detector rows for event studies and broker scans.",
+    )
+    if isinstance(backfill_range, tuple) and len(backfill_range) == 2:
+        backfill_start, backfill_end = backfill_range
+    else:
+        backfill_start, backfill_end = default_start, default_end
+
+    if st.button("Backfill historical data", use_container_width=True):
+        if not config.get_broker_api_token():
+            st.error("BROKER_API_TOKEN or STOCKBIT_TOKEN is not configured.")
+        else:
+            with st.spinner("Fetching historical broker-flow and per-broker rows..."):
+                result = pipeline.backfill_broker_history(
+                    watchlist,
+                    start_date=backfill_start,
+                    end_date=backfill_end,
+                    price_period="1y",
+                    refresh_prices=True,
+                )
+            st.success(
+                f"Stored {result['n_broker']} broker-flow rows, "
+                f"{result.get('n_activity', 0)} broker-activity rows, "
+                f"and {result['n_prices']} price rows."
+            )
+            st.rerun()
+
+    st.subheader("View settings")
+    selected_ticker = st.selectbox("Focused ticker", watchlist)
+    lookback_days = st.selectbox("Lookback window", [30, 60, 90, 180, 365], index=2)
+    horizon = st.selectbox("Forward return horizon", [1, 3, 5, 10], index=2)
+    min_events = st.number_input("Minimum broker events", min_value=2, max_value=30, value=5, step=1)
+    min_net_buy_b = st.number_input("Minimum broker net buy, Rp B", min_value=0.0, value=0.0, step=0.5)
 
     runs = storage.read_runs()
     if not runs.empty:
-        st.caption(f"Pipeline last run: {runs.iloc[0]['run_at']}")
+        st.caption(f"Last run: {runs.iloc[0]['run_at']}")
 
-    if not config.STOCKBIT_TOKEN:
-        st.warning("STOCKBIT_TOKEN is not set in .env — broker/bandar data will be unavailable, "
-                    "only price data (yfinance).", icon="⚠️")
 
-# ── load feature table ───────────────────────────────────────────────────────
+price_df = storage.read_prices(watchlist)
+broker_df = storage.read_broker_flow(watchlist)
+activity_df = storage.read_broker_activity(watchlist)
 feat = features.build_feature_table(watchlist)
 
-if feat.empty:
-    st.info("No data yet. Click **Run pipeline now** in the sidebar to start scraping.")
+if price_df.empty:
+    st.info("No price data yet. Run the latest pipeline from the sidebar.")
     st.stop()
 
-tab_overview, tab_broker, tab_analysis, tab_model = st.tabs(
-    ["📊 Overview", "🏦 Broker & Bandar", "🔍 Correlation Analysis", "🤖 Modeling / Hypothesis"]
+latest_price_date = price_df["date"].max()
+latest_broker_date = broker_df["date"].max() if not broker_df.empty else None
+latest_activity_date = activity_df["date"].max() if not activity_df.empty else None
+latest_signals = broker_df[broker_df["date"] == latest_broker_date].copy() if latest_broker_date is not None else pd.DataFrame()
+accumulation_count = 0
+if not latest_signals.empty:
+    accumulation_count = latest_signals["bandar_signal"].fillna("").str.contains("ACCUMULATION|AKUMULASI|NET_BUY").sum()
+
+metric_cols = st.columns(5)
+metric_cols[0].metric("Price rows", f"{len(price_df):,}")
+metric_cols[1].metric("Broker-flow rows", f"{len(broker_df):,}")
+metric_cols[2].metric("Broker-activity rows", f"{len(activity_df):,}")
+metric_cols[3].metric("Latest broker date", latest_broker_date.strftime("%Y-%m-%d") if latest_broker_date is not None else "-")
+metric_cols[4].metric("Accumulation names", f"{accumulation_count}")
+
+if broker_df.empty:
+    st.warning("Broker-flow data is empty. Use historical backfill to populate signals and broker details.")
+    st.stop()
+
+st.divider()
+
+st.subheader("Focused ticker diagnosis")
+focused_price = price_df[price_df["ticker"] == selected_ticker].copy()
+focused_flow = broker_df[broker_df["ticker"] == selected_ticker].copy()
+focused_activity = activity_df[activity_df["ticker"] == selected_ticker].copy()
+focused_scan_10d = analysis.broker_alpha_scan(
+    [selected_ticker],
+    horizon=10,
+    min_events=5,
+    min_net_value=0,
+    group_by=("ticker", "broker_code"),
+)
+diagnosis_text, top_accumulators, significant_brokers = focused_ticker_diagnosis(
+    selected_ticker,
+    focused_price,
+    focused_flow,
+    focused_activity,
+    focused_scan_10d,
+    lookback_days,
 )
 
-# ── tab: overview ─────────────────────────────────────────────────────────────
-with tab_overview:
-    latest = feat.sort_values("date").groupby("ticker").tail(1)
-    cols = st.columns(len(watchlist) if len(watchlist) <= 6 else 6)
-    for i, row in enumerate(latest.itertuples()):
-        with cols[i % len(cols)]:
-            close = getattr(row, "close", None)
-            ret1d = getattr(row, "return_1d", None)
-            signal = getattr(row, "bandar_signal", None)
-            st.metric(
-                label=row.ticker,
-                value=f"Rp {close:,.0f}" if pd.notna(close) else "-",
-                delta=f"{ret1d*100:+.2f}%" if pd.notna(ret1d) else None,
-            )
-            if pd.notna(signal):
-                emoji = "🟢" if "ACCUMULATION" in str(signal) or signal == "NET_BUY" else \
-                        "🔴" if "DISTRIBUTION" in str(signal) or signal == "NET_SELL" else "⚪"
-                st.caption(f"{emoji} {signal}")
+st.info(diagnosis_text)
 
-    st.subheader("Price history")
-    pick = st.selectbox("Select ticker", watchlist)
-    fig = analysis.plot_price_with_signal(feat, pick)
-    st.pyplot(fig, use_container_width=True)
-
-# ── tab: broker & bandar detail ────────────────────────────────────────────────
-with tab_broker:
-    st.subheader("Latest broker & bandar snapshot")
-    broker_df = storage.read_broker_flow(watchlist)
-    if broker_df.empty:
-        st.info("No broker/bandar data yet. Make sure STOCKBIT_TOKEN is set, then run the pipeline.")
+diag_cols = st.columns([1, 1])
+with diag_cols[0]:
+    st.markdown("**Top recent accumulators**")
+    if top_accumulators.empty:
+        st.caption("No recent net-buy broker rows.")
     else:
-        latest_broker = broker_df.sort_values("date").groupby("ticker").tail(1)
-        show_cols = ["ticker", "date", "bandar_signal", "foreign_net_broker", "local_net_broker",
-                     "foreign_net_flow", "foreign_signal", "conclusion_broker"]
+        acc_view = top_accumulators.head(10).copy()
+        for col in ["buy_value", "sell_value", "net_value"]:
+            acc_view[col] = acc_view[col].map(format_rp)
         st.dataframe(
-            latest_broker[show_cols].rename(columns={
-                "bandar_signal": "Bandar Signal", "foreign_net_broker": "Foreign Net (broker)",
-                "local_net_broker": "Local Net (broker)", "foreign_net_flow": "Foreign Net (flow)",
-                "foreign_signal": "Foreign Signal", "conclusion_broker": "Conclusion",
+            acc_view.rename(columns={
+                "broker_code": "Broker",
+                "participant_type": "Type",
+                "days": "Days",
+                "buy_value": "Buy",
+                "sell_value": "Sell",
+                "net_value": "Net Buy",
             }),
-            use_container_width=True, hide_index=True,
+            use_container_width=True,
+            hide_index=True,
         )
 
-        st.subheader("Per-ticker detail")
-        pick2 = st.selectbox("Select ticker", watchlist, key="broker_pick")
-        row = latest_broker[latest_broker["ticker"] == pick2]
-        if not row.empty:
-            r = row.iloc[0]
-            st.markdown(f"**{r['conclusion_broker'] or '-'}**")
-            st.markdown(f"**{r['conclusion_flow'] or '-'}**")
-
-# ── tab: correlation analysis ──────────────────────────────────────────────────
-with tab_analysis:
-    st.subheader(f"Correlation: smart-money signals vs {horizon}-day forward return")
-    corr = analysis.correlation_table(feat)
-    if corr.empty:
-        st.info("Not enough data for correlation.")
+with diag_cols[1]:
+    st.markdown("**Model-supported brokers, 10D**")
+    if significant_brokers.empty:
+        st.caption("No broker passed the 10D significance filter.")
     else:
-        st.dataframe(corr.style.format("{:.3f}").background_gradient(cmap="RdYlGn", vmin=-0.5, vmax=0.5),
-                     use_container_width=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Return distribution by bandar signal**")
-        fig2 = analysis.plot_signal_bucket_returns(feat, target_col=target_col)
-        st.pyplot(fig2, use_container_width=True)
-    with c2:
-        st.markdown("**Scatter: signal score vs forward return**")
-        fig3 = analysis.plot_signal_vs_forward_return(feat, horizon=horizon)
-        st.pyplot(fig3, use_container_width=True)
-
-    st.subheader("Summary table by signal")
-    st.dataframe(analysis.summary_by_signal(feat, target_col=target_col), use_container_width=True, hide_index=True)
-
-    st.subheader("Correlation by ticker")
-    st.dataframe(analysis.correlation_by_ticker(feat, target_col=target_col), use_container_width=True, hide_index=True)
-
-# ── tab: modeling ────────────────────────────────────────────────────────────
-with tab_model:
-    st.subheader("Hypothesis test: does smart money -> price increase?")
-    model_choice = st.radio("Classification model", ["logistic", "random_forest"], horizontal=True)
-
-    reg = modeling.linear_regression(feat, target_col=target_col)
-    clf = modeling.classify_up_down(feat, target_col=target_col, model_type=model_choice)
-
-    st.markdown("#### 📐 Linear regression (OLS)")
-    if reg.coefficients.empty:
-        st.warning(reg.summary_text)
-    else:
+        sig_view = significant_brokers[[
+            "broker_code", "n_events", "mean_fwd_return", "win_rate",
+            "avg_net_value", "total_net_value", "p_value_one_sided",
+        ]].head(10).copy()
         st.dataframe(
-            reg.coefficients.style.format({"coef": "{:+.5f}", "std_err": "{:.5f}", "p_value": "{:.4f}"}),
-            use_container_width=True, hide_index=True,
+            sig_view.rename(columns={
+                "broker_code": "Broker",
+                "n_events": "Events",
+                "mean_fwd_return": "Mean 10D",
+                "win_rate": "Win Rate",
+                "avg_net_value": "Avg Net Buy",
+                "total_net_value": "Total Net Buy",
+                "p_value_one_sided": "P Value",
+            }).style.format({
+                "Mean 10D": "{:+.2%}",
+                "Win Rate": "{:.0%}",
+                "Avg Net Buy": "Rp {:,.0f}",
+                "Total Net Buy": "Rp {:,.0f}",
+                "P Value": "{:.4f}",
+            }),
+            use_container_width=True,
+            hide_index=True,
         )
-        st.caption(f"n = {reg.n_obs}, R² = {reg.r_squared:.4f}")
 
-    st.markdown("#### 🤖 Up / not-up classification")
-    if not pd.notna(clf.accuracy):
-        st.warning(f"Not enough data for the classification model (n={clf.n_obs}, need >=20).")
-    else:
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Accuracy", f"{clf.accuracy:.1%}")
-        m2.metric("Precision", f"{clf.precision:.1%}")
-        m3.metric("Recall", f"{clf.recall:.1%}")
-        m4.metric("ROC-AUC", f"{clf.roc_auc:.2f}" if clf.roc_auc else "-")
-        st.dataframe(clf.feature_importance, use_container_width=True, hide_index=True)
+st.divider()
 
-    st.markdown("#### 📝 Verdict")
-    st.info(modeling.hypothesis_verdict(reg, clf))
+st.subheader("Market snapshot")
+snapshot_cols = [
+    "ticker", "date", "bandar_signal", "bandar_signal_score",
+    "foreign_net_broker", "local_net_broker", "total_value",
+]
+snapshot = latest_signals[[col for col in snapshot_cols if col in latest_signals.columns]]
+st.dataframe(
+    clean_signal_table(snapshot).rename(columns={
+        "ticker": "Ticker",
+        "date": "Date",
+        "bandar_signal": "Signal",
+        "bandar_signal_score": "Score",
+        "foreign_net_broker": "Foreign Net",
+        "local_net_broker": "Local Net",
+        "total_value": "Value",
+    }),
+    use_container_width=True,
+    hide_index=True,
+)
 
-    st.caption(
-        "Note: with a small watchlist and short history, this output is a starting point for "
-        "exploration, not a ready-to-trade signal. Run the pipeline every trading day to accumulate "
-        "more historical data and the results will become more reliable."
+st.divider()
+
+st.subheader("Event study")
+event_signal_filter = [
+    "STRONG_ACCUMULATION", "ACCUMULATION", "NET_BUY",
+    "AKUMULASI_KUAT", "AKUMULASI",
+]
+event_scope = st.radio(
+    "Event scope",
+    ["Focused ticker", "All watchlist"],
+    horizontal=True,
+)
+event_tickers = [selected_ticker] if event_scope == "Focused ticker" else watchlist
+event_table = analysis.event_study_table(
+    tickers=event_tickers,
+    horizons=(1, 3, 5, 10),
+    lookback_days=lookback_days,
+    signals=event_signal_filter,
+)
+st.pyplot(
+    analysis.plot_event_study(
+        tickers=event_tickers,
+        horizons=(1, 3, 5, 10),
+        lookback_days=lookback_days,
+        aggregate=False,
+        signals=event_signal_filter,
+    ),
+    use_container_width=True,
+)
+
+if event_table.empty:
+    st.info("No accumulation events match this scope. Extend the backfill range or use all watchlist events.")
+else:
+    outcome_cols = [col for col in event_table.columns if col.startswith("t_plus_") and col != "t_plus_0d"]
+    event_view = event_table.copy()
+    event_view["bandar_signal"] = event_view["bandar_signal"].map(format_signal)
+    for col in outcome_cols:
+        event_view[col] = event_view[col].map(lambda value: value - 100 if pd.notna(value) else value)
+    st.dataframe(
+        event_view.rename(columns={
+            "ticker": "Ticker",
+            "signal_date": "Signal Date",
+            "bandar_signal": "Signal",
+            "bandar_signal_score": "Score",
+            "t_plus_1d": "Return 1D",
+            "t_plus_3d": "Return 3D",
+            "t_plus_5d": "Return 5D",
+            "t_plus_10d": "Return 10D",
+        }).style.format({
+            "Return 1D": "{:+.2f}%",
+            "Return 3D": "{:+.2f}%",
+            "Return 5D": "{:+.2f}%",
+            "Return 10D": "{:+.2f}%",
+        }, na_rep="-"),
+        use_container_width=True,
+        hide_index=True,
     )
+
+st.divider()
+
+st.subheader("Broker detail")
+left, right = st.columns([1.2, 1])
+
+with left:
+    st.markdown(f"**{selected_ticker} price and signal history**")
+    st.pyplot(analysis.plot_price_signal_panel(selected_ticker), use_container_width=True)
+
+with right:
+    st.markdown("**Broker distribution**")
+    ticker_activity = activity_df[activity_df["ticker"] == selected_ticker].copy()
+    if ticker_activity.empty:
+        st.info("No per-broker rows for this ticker. Run historical backfill.")
+    else:
+        available_dates = sorted(ticker_activity["date"].dropna().dt.date.unique().tolist())
+        selected_date = st.selectbox("Distribution date", available_dates, index=len(available_dates) - 1)
+        st.pyplot(
+            analysis.plot_broker_distribution(selected_ticker, trade_date=str(selected_date), top_n=12),
+            use_container_width=True,
+        )
+
+        dist_table = analysis.broker_distribution_table(selected_ticker, trade_date=str(selected_date), top_n=15)
+        if not dist_table.empty:
+            dist_view = dist_table[[
+                "broker_code", "participant_type", "buy_value", "sell_value", "net_value", "frequency",
+            ]].copy()
+            for col in ["buy_value", "sell_value", "net_value"]:
+                dist_view[col] = dist_view[col].map(format_rp)
+            st.dataframe(
+                dist_view.rename(columns={
+                    "broker_code": "Broker",
+                    "participant_type": "Type",
+                    "buy_value": "Buy",
+                    "sell_value": "Sell",
+                    "net_value": "Net",
+                    "frequency": "Freq",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+st.markdown("**Broker flow over time**")
+if activity_df.empty:
+    st.info("No broker-activity data available.")
+else:
+    ticker_activity = activity_df[activity_df["ticker"] == selected_ticker].copy()
+    broker_options = sorted(ticker_activity["broker_code"].dropna().unique().tolist())
+    default_brokers = (
+        ticker_activity.assign(abs_net=lambda df: df["net_value"].abs())
+        .groupby("broker_code")["abs_net"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(5)
+        .index
+        .tolist()
+    )
+    selected_brokers = st.multiselect("Broker codes", broker_options, default=default_brokers)
+    st.pyplot(
+        analysis.plot_broker_flow(selected_ticker, broker_codes=selected_brokers, lookback_days=lookback_days),
+        use_container_width=True,
+    )
+
+st.divider()
+
+st.subheader("Broker accumulation scanner")
+st.caption(
+    "This ranks cases where a broker repeatedly net-bought a ticker, then measures forward returns. "
+    "The significant flag requires at least five events, positive average return, and one-sided p-value below 0.05."
+)
+
+group_choice = st.radio(
+    "Scan mode",
+    ["Ticker plus broker", "Broker across watchlist"],
+    horizontal=True,
+)
+group_by = ("ticker", "broker_code") if group_choice == "Ticker plus broker" else ("broker_code",)
+scan = analysis.broker_alpha_scan(
+    watchlist,
+    horizon=horizon,
+    min_events=int(min_events),
+    min_net_value=float(min_net_buy_b) * 1e9,
+    group_by=group_by,
+)
+
+if scan.empty:
+    st.info("No broker combinations have enough completed forward-return events under these settings.")
+else:
+    visible_cols = [
+        col for col in [
+            "ticker", "broker_code", "n_events", "mean_fwd_return", "median_fwd_return",
+            "win_rate", "avg_net_value", "total_net_value", "t_stat", "p_value_one_sided",
+            "significant", "status",
+        ] if col in scan.columns
+    ]
+    scan_view = scan[visible_cols].copy()
+    st.dataframe(
+        scan_view.rename(columns={
+            "ticker": "Ticker",
+            "broker_code": "Broker",
+            "n_events": "Events",
+            "mean_fwd_return": "Mean Return",
+            "median_fwd_return": "Median Return",
+            "win_rate": "Win Rate",
+            "avg_net_value": "Avg Net Buy",
+            "total_net_value": "Total Net Buy",
+            "t_stat": "T Stat",
+            "p_value_one_sided": "P Value",
+            "significant": "Significant",
+            "status": "Status",
+        }).style.format({
+            "Mean Return": "{:+.2%}",
+            "Median Return": "{:+.2%}",
+            "Win Rate": "{:.0%}",
+            "Avg Net Buy": "Rp {:,.0f}",
+            "Total Net Buy": "Rp {:,.0f}",
+            "T Stat": "{:.2f}",
+            "P Value": "{:.4f}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    significant_count = int(scan["significant"].sum()) if "significant" in scan.columns else 0
+    if significant_count:
+        st.success(f"{significant_count} broker combination(s) meet the current statistical filter.")
+    else:
+        st.warning("No combination meets the significance filter yet. Use a longer backfill range or broader watchlist.")
+
+st.caption(
+    f"Database: {storage.config.DB_PATH} | Latest price date: {latest_price_date:%Y-%m-%d} | "
+    f"Latest broker-activity date: {latest_activity_date:%Y-%m-%d}" if latest_activity_date is not None
+    else f"Database: {storage.config.DB_PATH} | Latest price date: {latest_price_date:%Y-%m-%d}"
+)
