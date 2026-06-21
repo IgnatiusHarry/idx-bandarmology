@@ -146,11 +146,15 @@ Ranking every broker by *how its repeated net-buying of BULL was followed by for
 
 ![Broker accumulation scanner — systematic screening across brokers](docs/screenshots/broker_scanner.png)
 
-### Who keeps buying BULL? A governance breadcrumb
+### Who keeps buying BULL? Connecting the flow to the "bandar"
 
-The single most persistent net-buyer of BULL in this window is broker code **II**. Public broker-code references map this code to **PT Danatama Makmur Sekuritas**. Based on publicly reported board compositions and shareholder disclosures, this brokerage and the issuer (BULL) have a **reported corporate affiliation** — overlapping membership of the same controlling family at board level, and Danatama-linked entities listed on BULL's public shareholder register. (These are reported public-record relationships; readers should confirm current details against the latest exchange filings.)
+Look past win rate for a second and just ask *who shows up over and over*. Broker code **II** net-bought BULL on **38 separate trading days** in this window — by far the most **persistent** accumulator on the stock. It is the steadily climbing red (II) line in the broker-flow chart below: it keeps adding even while price chops sideways and other brokers flip in and out. That relentless, price-insensitive buying is the classic fingerprint of a **"bandar"** — a large, patient operator quietly building a position rather than chasing momentum.
 
-> ⚠️ This is an **observational hypothesis, not an allegation.** A broker code identifies the *executing member firm*, not the end client, so it cannot prove who actually traded. There is **no public evidence** that any specific director or insider routed personal trades through this broker. The point is methodological: broker-flow analysis can surface affiliated-party relationships that are worth investigating with proper disclosures — exactly the kind of lead a data pipeline should generate.
+So who is behind that code? Public broker-code references map **II** to **PT Danatama Makmur Sekuritas**. Based on publicly reported board compositions and shareholder disclosures, this brokerage and the issuer (BULL) share a **reported corporate affiliation** — overlapping membership of the same controlling family at board level, and Danatama-linked entities listed on BULL's public shareholder register. (Reported public-record relationships; confirm current details against the latest exchange filings.)
+
+> **The hypothesis this surfaces:** the most persistent "bandar" accumulating BULL is routing through a broker **affiliated with BULL's own controlling owners** — i.e. the patient smart money on this stock may be connected to the insiders themselves. That is a striking, *testable* lead that the pipeline produced automatically from raw broker codes.
+
+> ⚠️ **Observational hypothesis, not an allegation.** A broker code identifies the *executing member firm*, not the end client, so it cannot prove who actually traded — many unrelated clients can route orders through the same broker. There is **no public evidence** that any specific director or insider placed these trades. The value here is methodological: broker-flow data turned an anonymous code into a named, affiliated counterparty worth investigating with proper disclosures.
 
 ![Broker flow by daily net accumulation](docs/screenshots/broker_flow_accumulation.png)
 
