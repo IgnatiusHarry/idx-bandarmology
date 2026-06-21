@@ -123,37 +123,51 @@ The dashboard now defaults to **historical returns**. If you switch to **forward
 
 ## Results
 
-A worked example on **BULL** (PT Buana Lintas Lautan) over ~Apr–Jun 2026.
+A worked example on **BULL** (PT Buana Lintas Lautan), backfilled over **2026-03-31 → 2026-06-19** (243 price rows, 105 broker-flow rows, 3,353 broker-activity rows).
 
-**Headline finding:** the *aggregate* "bandar" label is noisy and tracks price more than it leads it — but **individual broker behaviour shows an initial, testable edge**. Ranking cases where a single broker repeatedly net-bought a ticker and then measuring forward returns surfaces a statistically significant result:
+### Headline: the aggregate signal can mislead
 
-> Broker **EL** net-buying **BULL**: **14 events**, mean **10-day forward return +15.0%**, **win rate 71%**, one-sided **p-value 0.0348** (significant at the 5% level: ≥5 events, positive mean, p < 0.05).
-
-Over the same window the stock itself fell (5D −7.7%, 10D −6.8%) while its latest *aggregate* signal read **Strong Distribution** — a good illustration of why the broker-level view beats the headline label.
-
-### Price with smart-money signal overlays
-Daily close with accumulation/distribution markers underneath — distribution clusters dominate the down-leg.
+BULL rose **+17.18% over 5 days** and **+15.06% over 10 days** — while its *latest aggregate* "bandar" signal read **Strong Distribution** (i.e. bearish). The headline label was pointing the wrong way. The useful information was one level down, in **individual broker behaviour**.
 
 ![Price with smart-money signal overlays](docs/screenshots/price_signal_overlay.png)
 
-### Broker flow by daily net accumulation
-Cumulative net value per broker (vs. close price, dashed). Brokers visibly diverge — some accumulate while others distribute into the same move.
+### Not all brokers are equal — volume ≠ skill
+
+Ranking every broker by *how its repeated net-buying of BULL was followed by forward returns* (≥5 events, positive mean, one-sided p < 0.05 to flag as significant) separates real edge from noise. The highest-**volume** brokers turned out to be the least predictive:
+
+| Broker | Net-buy events | Win rate | Mean 10-day fwd return | p-value | Significant? |
+|--------|:---:|:---:|:---:|:---:|:---:|
+| **GA** | 11 | **73%** | **+15.48%** | **0.0053** | ✅ yes |
+| II | 38 | 50% | +3.77% | 0.0642 | ❌ no |
+| ZP | 37 | 46% | — | 0.1171 | ❌ no |
+| SQ | 35 | 49% | — | 0.0822 | ❌ no |
+
+> Lower-volume broker **GA** carried a genuine, statistically significant edge (p = 0.0053 ≈ 99.5% confidence), while the three biggest-volume brokers on the stock (II, ZP, SQ) had roughly coin-flip win rates. Across the whole watchlist, **17 broker–ticker combinations** passed the significance filter.
+
+![Broker accumulation scanner — systematic screening across brokers](docs/screenshots/broker_scanner.png)
+
+### Who keeps buying BULL? A governance breadcrumb
+
+The single most persistent net-buyer of BULL in this window is broker code **II**. Publicly available references map this code to **PT Danatama Makmur Sekuritas** — a brokerage **corporately affiliated with the issuer**: the two share members of the same controlling family on their boards (a common President Commissioner), and Danatama-linked entities appear on BULL's public shareholder register.
+
+> ⚠️ This is an **observational hypothesis, not an allegation.** A broker code identifies the *executing member firm*, not the end client, so it cannot prove who actually traded. There is **no public evidence** that any specific director or insider routed personal trades through this broker. The point is methodological: broker-flow analysis can surface affiliated-party relationships that are worth investigating with proper disclosures — exactly the kind of lead a data pipeline should generate.
 
 ![Broker flow by daily net accumulation](docs/screenshots/broker_flow_accumulation.png)
 
-### Event study after signal dates
-Normalized price paths (signal date = 100) for accumulation events out to +10 days, with the average path in black.
+### Event study: what happens after an accumulation signal?
+
+Normalized price paths (signal date = 100) for each accumulation event out to +10 days, with the **average path** in black. The average drifts **above 100 through the +5-day horizon**, consistent with a short-lived post-accumulation bump rather than a durable trend.
 
 ![Event study after signal dates](docs/screenshots/event_study.png)
 
-### Broker distribution snapshot
-Net buy (green) vs. net sell (red) by broker on a single day — the cross-section behind each daily signal.
+### Correlation snapshot
+
+- `bandar_signal_score` vs `back_return_5d`: **0.251** (moderate positive)
+- `foreign_net_flow_pct` vs `back_return_1d`: **0.853** (strong, same-day)
 
 ![Broker distribution snapshot](docs/screenshots/broker_distribution.png)
 
-> Scope note: a short history and a small watchlist make these findings exploratory, not production trading signals — see Methodology below.
->
-> Reproducibility: figures above are a snapshot from the BULL analysis (~Apr–Jun 2026 broker history) produced by `notebooks/01_bandarmology_end_to_end.ipynb` and `dashboard/app.py` against the same SQLite warehouse. Re-running the pipeline on a longer history will shift the exact numbers.
+> Scope & reproducibility: these are a snapshot from the BULL analysis (2026-03-31 → 2026-06-19) produced by `notebooks/01_bandarmology_end_to_end.ipynb` and `dashboard/app.py` against the same SQLite warehouse. A short history, a small watchlist, and multiple-testing risk make these findings **exploratory, not production trading signals** — re-running on a longer history will shift the exact numbers. See the Disclaimer at the bottom.
 
 ## Methodology
 
@@ -175,3 +189,5 @@ With a short history and a small watchlist, results are exploratory rather than 
 ## Disclaimer
 
 This project is for education and personal research. It is not investment advice. Access to the private broker-flow endpoint requires your own account token and should be used in line with the provider's terms of service.
+
+The corporate-affiliation note in **Results** ("governance breadcrumb") is based on publicly reported information about board composition and shareholder registers, and is presented strictly as an observational research hypothesis. Broker codes identify the executing member firm, not the underlying client; nothing here asserts, or should be read to imply, that any named company or individual engaged in insider trading or any other wrongdoing.
