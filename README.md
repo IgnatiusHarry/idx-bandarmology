@@ -125,7 +125,7 @@ The dashboard now defaults to **historical returns**. If you switch to **forward
 
 A worked example on **BULL** (PT Buana Lintas Lautan) over ~Apr–Jun 2026.
 
-**Headline finding:** the *aggregate* "bandar" label is noisy and tracks price more than it leads it — but **individual broker behaviour carries a real, testable signal**. Ranking cases where a single broker repeatedly net-bought a ticker and then measuring forward returns surfaces a statistically significant edge:
+**Headline finding:** the *aggregate* "bandar" label is noisy and tracks price more than it leads it — but **individual broker behaviour shows an initial, testable edge**. Ranking cases where a single broker repeatedly net-bought a ticker and then measuring forward returns surfaces a statistically significant result:
 
 > Broker **EL** net-buying **BULL**: **14 events**, mean **10-day forward return +15.0%**, **win rate 71%**, one-sided **p-value 0.0348** (significant at the 5% level: ≥5 events, positive mean, p < 0.05).
 
@@ -152,6 +152,8 @@ Net buy (green) vs. net sell (red) by broker on a single day — the cross-secti
 ![Broker distribution snapshot](docs/screenshots/broker_distribution.png)
 
 > Scope note: a short history and a small watchlist make these findings exploratory, not production trading signals — see Methodology below.
+>
+> Reproducibility: figures above are a snapshot from the BULL analysis (~Apr–Jun 2026 broker history) produced by `notebooks/01_bandarmology_end_to_end.ipynb` and `dashboard/app.py` against the same SQLite warehouse. Re-running the pipeline on a longer history will shift the exact numbers.
 
 ## Methodology
 
