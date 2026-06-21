@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS broker_flow (
     ticker              TEXT NOT NULL,
     bandar_signal       TEXT,
     bandar_signal_score REAL,
-    foreign_net_broker  REAL,   -- from Stockbit broker_summary (Asing net)
+    foreign_net_broker  REAL,   -- from Stockbit broker_summary (foreign net, "Asing")
     local_net_broker    REAL,
     gov_net_broker      REAL,
     foreign_net_flow    REAL,   -- from Stockbit foreign-domestic chart

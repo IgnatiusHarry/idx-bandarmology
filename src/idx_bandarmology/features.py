@@ -3,7 +3,7 @@ tidy feature table for analysis & modeling.
 
 Core idea for the hypothesis test ("does smart money flow affect price?"):
 for each (ticker, date) where we have a broker/bandar snapshot, compute the
-*forward* price return over the next N days, so we can ask "when bandar/asing
+*forward* price return over the next N days, so we can ask "when bandar/foreign
 accumulated today, did price actually go up afterwards?" — not just same-day
 correlation, which can be circular (heavy buying same day mechanically pushes
 price up).
@@ -85,8 +85,8 @@ def build_feature_table(tickers: list[str] | None = None,
     # Encode the categorical bandar signal as a numeric score too, in case
     # bandar_signal_score is missing for some rows.
     score_map = {
-        "AKUMULASI_KUAT": 2, "AKUMULASI": 1, "NETRAL": 0,
-        "DISTRIBUSI": -1, "DISTRIBUSI_KUAT": -2,
+        "STRONG_ACCUMULATION": 2, "ACCUMULATION": 1, "NEUTRAL": 0,
+        "DISTRIBUTION": -1, "STRONG_DISTRIBUTION": -2,
         "NET_BUY": 1, "NET_SELL": -1,
     }
     merged["bandar_signal_score"] = merged["bandar_signal_score"].fillna(

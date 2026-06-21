@@ -54,14 +54,14 @@ def correlation_by_ticker(feat: pd.DataFrame, signal_col: str = "bandar_signal_s
 
 def summary_by_signal(feat: pd.DataFrame, target_col: str = "fwd_return_5d") -> pd.DataFrame:
     """Mean/median forward return grouped by bandar_signal bucket — the most
-    intuitive table for the hypothesis: does 'AKUMULASI' really precede
-    higher returns than 'DISTRIBUSI'?
+    intuitive table for the hypothesis: does 'ACCUMULATION' really precede
+    higher returns than 'DISTRIBUTION'?
     """
     if "bandar_signal" not in feat.columns or target_col not in feat.columns:
         return pd.DataFrame()
     g = feat.dropna(subset=[target_col]).groupby("bandar_signal")[target_col]
     out = g.agg(n="count", mean_return="mean", median_return="median", std="std").reset_index()
-    order = ["DISTRIBUSI_KUAT", "DISTRIBUSI", "NET_SELL", "NETRAL", "NET_BUY", "AKUMULASI", "AKUMULASI_KUAT"]
+    order = ["STRONG_DISTRIBUTION", "DISTRIBUTION", "NET_SELL", "NEUTRAL", "NET_BUY", "ACCUMULATION", "STRONG_ACCUMULATION"]
     out["_order"] = out["bandar_signal"].apply(lambda s: order.index(s) if s in order else 99)
     return out.sort_values("_order").drop(columns="_order").reset_index(drop=True)
 
@@ -84,7 +84,7 @@ def plot_signal_vs_forward_return(feat: pd.DataFrame, horizon: int = 5,
 
 def plot_signal_bucket_returns(feat: pd.DataFrame, target_col: str = "fwd_return_5d") -> plt.Figure:
     """Boxplot of forward returns, one box per bandar_signal bucket."""
-    order = ["DISTRIBUSI_KUAT", "DISTRIBUSI", "NET_SELL", "NETRAL", "NET_BUY", "AKUMULASI", "AKUMULASI_KUAT"]
+    order = ["STRONG_DISTRIBUTION", "DISTRIBUTION", "NET_SELL", "NEUTRAL", "NET_BUY", "ACCUMULATION", "STRONG_ACCUMULATION"]
     sub = feat.dropna(subset=[target_col, "bandar_signal"]).copy()
     present = [o for o in order if o in sub["bandar_signal"].unique()]
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -103,9 +103,9 @@ def plot_price_with_signal(feat: pd.DataFrame, ticker: str) -> plt.Figure:
     """Price line for one ticker, with markers colored by that day's bandar signal."""
     sub = feat[feat["ticker"] == ticker].dropna(subset=["close"]).sort_values("date")
     color_map = {
-        "AKUMULASI_KUAT": "#1a9850", "AKUMULASI": "#91cf60", "NET_BUY": "#91cf60",
-        "NETRAL": "#999999",
-        "DISTRIBUSI": "#fc8d59", "DISTRIBUSI_KUAT": "#d73027", "NET_SELL": "#fc8d59",
+        "STRONG_ACCUMULATION": "#1a9850", "ACCUMULATION": "#91cf60", "NET_BUY": "#91cf60",
+        "NEUTRAL": "#999999",
+        "DISTRIBUTION": "#fc8d59", "STRONG_DISTRIBUTION": "#d73027", "NET_SELL": "#fc8d59",
     }
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(sub["date"], sub["close"], color="#444", linewidth=1.2, label="Close")

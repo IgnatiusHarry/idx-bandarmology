@@ -49,19 +49,28 @@ This project turns that argument into a falsifiable, data-driven test:
 
 ## Architecture
 
-```
-   SOURCES                  PIPELINE (ELT)              WAREHOUSE            ANALYTICS LAYER
-┌──────────────┐        ┌───────────────────┐      ┌──────────────┐    ┌────────────────────┐
-│  yfinance    │──OHLCV─▶│  extract          │      │              │    │  Notebook          │
-│  (prices)    │        │   → clean/flatten  │─────▶│   SQLite     │───▶│  Streamlit dash    │
-├──────────────┤        │   → upsert         │      │  prices      │    └────────────────────┘
-│  Stockbit    │──flow──▶│  (idempotent,      │      │  broker_flow │              │
-│ (broker/bandar)        │   per-section      │      │  runs (audit)│              ▼
-└──────────────┘        │   fallback)        │      └──────────────┘   ┌────────────────────┐
-                        └───────────────────┘                          │ features → analysis│
-                                                                        │ → modeling         │
-                                                                        │ (OLS, LogReg, RF)  │
-                                                                        └────────────────────┘
+```mermaid
+flowchart LR
+    subgraph S["Sources"]
+        Y["yfinance<br/>OHLCV prices"]
+        K["Stockbit<br/>broker / bandar flow"]
+    end
+    subgraph P["Pipeline (ELT)"]
+        E["extract → clean / flatten<br/>→ idempotent upsert<br/>(per-section fallback)"]
+    end
+    subgraph W["Warehouse (SQLite)"]
+        DB[("prices<br/>broker_flow<br/>runs · audit")]
+    end
+    subgraph A["Analytics layer"]
+        F["features → analysis → modeling<br/>OLS · Logistic Reg · Random Forest"]
+        D["Notebook + Streamlit dashboard"]
+    end
+
+    Y --> E
+    K --> E
+    E --> DB
+    DB --> F
+    F --> D
 ```
 
 Every module is self-contained and independently usable — see
@@ -110,10 +119,32 @@ a misleading one:
 
 ---
 
+## Results
+
+The interactive Streamlit dashboard turns the pipeline output into four views:
+
+| Tab | What it answers |
+|---|---|
+| **Overview** | Latest price, daily change, and today's bandar signal per ticker, with a price chart marked by signal. |
+| **Broker & Bandar** | Per-ticker broker summary, foreign vs. domestic flow, and a plain-language conclusion. |
+| **Correlation Analysis** | Correlation table, return distribution per signal bucket, and a signal-vs-forward-return scatter. |
+| **Modeling / Hypothesis** | OLS coefficients + p-values, classifier accuracy/precision/recall/ROC-AUC, and a plain-language verdict. |
+
+<!-- Screenshots live in docs/screenshots/. Add yours and reference them here, e.g.:
+![Dashboard — Overview](docs/screenshots/overview.png)
+![Modeling / Hypothesis](docs/screenshots/modeling.png)
+-->
+
+> **Reading the verdict:** the model output is reported against an honest ~50%
+> random baseline and explicitly states when there is not yet enough data to
+> draw a conclusion — measurement first, storytelling second.
+
+---
+
 ## Quickstart
 
 ```bash
-git clone https://github.com/<your-username>/idx-bandarmology.git
+git clone https://github.com/IgnatiusHarry/idx-bandarmology.git
 cd idx-bandarmology
 
 python -m venv .venv && source .venv/bin/activate   # recommended
@@ -147,12 +178,12 @@ Four tabs — **Overview** (latest price + today's signal per ticker),
 final verdict). The dashboard and notebook share the same SQLite file, so they
 are always in sync.
 
-### Getting a `STOCKBIT_TOKEN`
+### About the `STOCKBIT_TOKEN`
 
-Log in to [stockbit.com](https://stockbit.com), open DevTools → **Network**,
-refresh any stock page, find a request to `exodus.stockbit.com`, and copy the
-value after `Bearer ` from the **Authorization** header into `.env`. The token
-is tied to your own session — `.env` is git-ignored and must never be committed.
+The broker/bandar sections authenticate with a personal Stockbit session token
+that you supply via `.env` (`STOCKBIT_TOKEN=...`). The token is tied to your own
+account, so it is kept private — `.env` is git-ignored and must never be
+committed. Without it, the pipeline still runs on price data alone.
 
 ---
 

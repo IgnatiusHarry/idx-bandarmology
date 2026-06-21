@@ -15,7 +15,7 @@ accuracy with a black box:
    Simple logistic regression / random forest classifying "price went up
    over the next N days" (1/0) from today's smart-money signals.
    -> gives you accuracy / precision / recall / a feature-importance view,
-      i.e. "if I only trade when bandar shows AKUMULASI, how often does
+      i.e. "if I only trade when bandar shows ACCUMULATION, how often does
       price actually go up afterwards?"
 
 Both functions return plain dicts/DataFrames so they're easy to print or
@@ -177,31 +177,31 @@ def hypothesis_verdict(reg: RegressionResult, clf: ClassificationResult) -> str:
     into a notebook markdown cell or the dashboard."""
     lines = []
     if reg.coefficients.empty:
-        lines.append("Belum cukup data untuk uji hipotesis (perlu lebih banyak hari pipeline berjalan).")
+        lines.append("Not enough data for a hypothesis test (need more days of pipeline runs).")
         return "\n".join(lines)
 
     sig_rows = reg.coefficients[reg.coefficients["significant"]]
     if sig_rows.empty:
         lines.append(
-            f"Regresi OLS (n={reg.n_obs}, R²={reg.r_squared:.3f}) TIDAK menemukan hubungan "
-            f"yang signifikan secara statistik (p<0.05) antara sinyal smart money dan "
-            f"{reg.target}. Hipotesis belum terbukti pada data ini."
+            f"OLS regression (n={reg.n_obs}, R²={reg.r_squared:.3f}) found NO statistically "
+            f"significant relationship (p<0.05) between the smart-money signals and "
+            f"{reg.target}. The hypothesis is not supported by this data."
         )
     else:
         bits = [f"{r.feature} (coef={r.coef:+.4f}, p={r.p_value:.3f})" for r in sig_rows.itertuples()]
         lines.append(
-            f"Regresi OLS (n={reg.n_obs}, R²={reg.r_squared:.3f}) menemukan hubungan signifikan: "
-            + "; ".join(bits) + f" terhadap {reg.target}."
+            f"OLS regression (n={reg.n_obs}, R²={reg.r_squared:.3f}) found a significant relationship: "
+            + "; ".join(bits) + f" with {reg.target}."
         )
 
     if not np.isnan(clf.accuracy):
         lines.append(
-            f"Model klasifikasi ({clf.model_name}, n={clf.n_obs}): akurasi {clf.accuracy:.1%}, "
+            f"Classification model ({clf.model_name}, n={clf.n_obs}): accuracy {clf.accuracy:.1%}, "
             f"precision {clf.precision:.1%}, recall {clf.recall:.1%}"
             + (f", ROC-AUC {clf.roc_auc:.2f}" if clf.roc_auc else "")
-            + ". (Baseline acak ~50% untuk 2 kelas seimbang — bandingkan akurasi di atas dengan itu.)"
+            + ". (Random baseline ~50% for 2 balanced classes — compare the accuracy above against that.)"
         )
     else:
-        lines.append("Data belum cukup untuk model klasifikasi (perlu >=20 baris lengkap).")
+        lines.append("Not enough data for the classification model (need >=20 complete rows).")
 
     return "\n".join(lines)

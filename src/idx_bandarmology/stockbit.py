@@ -14,7 +14,7 @@ sources without a broker login):
 
 Every numeric field is normalized to a float or ``None`` — nothing is
 fabricated when a field is missing. Each section also carries a short
-Indonesian ``conclusion`` string for quick reading in the dashboard.
+English ``conclusion`` string for quick reading in the dashboard.
 
 Credit: this client started from a hands-on script written by the repo
 owner against Stockbit's internal API; restructured here for reuse in the
@@ -95,17 +95,17 @@ def _raw(o: Any) -> Optional[float]:
 
 
 def _rp(v: Optional[float]) -> str:
-    """Human Rupiah (T = triliun, M = miliar, Jt = juta)."""
+    """Human-readable Rupiah (T = trillion, B = billion, M = million)."""
     if v is None:
         return "-"
     a = abs(v)
     sign = "-" if v < 0 else ""
     if a >= 1e12:
-        return f"{sign}Rp {a / 1e12:.2f} T"
+        return f"{sign}Rp {a / 1e12:.2f}T"
     if a >= 1e9:
-        return f"{sign}Rp {a / 1e9:.2f} M"
+        return f"{sign}Rp {a / 1e9:.2f}B"
     if a >= 1e6:
-        return f"{sign}Rp {a / 1e6:.2f} Jt"
+        return f"{sign}Rp {a / 1e6:.2f}M"
     return f"{sign}Rp {a:.0f}"
 
 
@@ -113,18 +113,18 @@ def _sym(ticker: str) -> str:
     return ticker.upper().replace(".JK", "").strip()
 
 
-# accdist label -> (signal code, score, readable Indonesian)
+# accdist label -> (signal code, score, readable text)
 _ACC_MAP: dict[str, tuple[str, int, str]] = {
-    "Big Acc": ("AKUMULASI_KUAT", 2, "akumulasi kuat"),
-    "Small Acc": ("AKUMULASI", 1, "akumulasi"),
-    "Neutral": ("NETRAL", 0, "netral"),
-    "Small Dist": ("DISTRIBUSI", -1, "distribusi"),
-    "Big Dist": ("DISTRIBUSI_KUAT", -2, "distribusi kuat"),
+    "Big Acc": ("STRONG_ACCUMULATION", 2, "strong accumulation"),
+    "Small Acc": ("ACCUMULATION", 1, "accumulation"),
+    "Neutral": ("NEUTRAL", 0, "neutral"),
+    "Small Dist": ("DISTRIBUTION", -1, "distribution"),
+    "Big Dist": ("STRONG_DISTRIBUTION", -2, "strong distribution"),
 }
 
 
 def _accdist(label: Optional[str]) -> tuple[str, int, str]:
-    return _ACC_MAP.get(label or "", ("NETRAL", 0, "netral"))
+    return _ACC_MAP.get(label or "", ("NEUTRAL", 0, "neutral"))
 
 
 # ── section: broker summary + bandar detector ────────────────────────────────
@@ -206,12 +206,12 @@ def _broker_section(sym: str) -> dict[str, Any]:
         signal, readable, score = sig5, read5, score5
 
     top5 = bandar_out["top5"] or {}
-    fnet_word = "net beli" if foreign_net > 0 else "net jual" if foreign_net < 0 else "seimbang"
+    fnet_word = "net buy" if foreign_net > 0 else "net sell" if foreign_net < 0 else "balanced"
     conclusion = (
-        f"Bandar besar (top 5 broker) terindikasi {readable} "
-        f"({_rp(top5.get('amount'))}, {(top5.get('percent') or 0):.1f}% nilai). "
-        f"Asing {fnet_word} {_rp(abs(foreign_net))} hari ini; lokal {_rp(local_net)}. "
-        f"{bandar_out['totalBuyer'] or 0} broker beli vs {bandar_out['totalSeller'] or 0} broker jual."
+        f"Big players (top 5 brokers) show signs of {readable} "
+        f"({_rp(top5.get('amount'))}, {(top5.get('percent') or 0):.1f}% of value). "
+        f"Foreign {fnet_word} {_rp(abs(foreign_net))} today; local {_rp(local_net)}. "
+        f"{bandar_out['totalBuyer'] or 0} brokers buying vs {bandar_out['totalSeller'] or 0} brokers selling."
     )
 
     return {
@@ -260,20 +260,20 @@ def _foreign_domestic_section(sym: str) -> dict[str, Any]:
 
     netpct = (net_foreign / total * 100) if (net_foreign is not None and total) else None
     if net_foreign is None:
-        word, signal = "tidak tersedia", "NETRAL"
+        word, signal = "not available", "NEUTRAL"
     elif net_foreign > 0:
-        word = "net beli (akumulasi asing)"
-        signal = "AKUMULASI" if (netpct or 0) >= 5 else "NET_BUY"
+        word = "net buy (foreign accumulation)"
+        signal = "ACCUMULATION" if (netpct or 0) >= 5 else "NET_BUY"
     elif net_foreign < 0:
-        word = "net jual (distribusi asing)"
-        signal = "DISTRIBUSI" if (netpct or 0) <= -5 else "NET_SELL"
+        word = "net sell (foreign distribution)"
+        signal = "DISTRIBUTION" if (netpct or 0) <= -5 else "NET_SELL"
     else:
-        word, signal = "seimbang", "NETRAL"
+        word, signal = "balanced", "NEUTRAL"
     out["signal"] = signal
     out["conclusion"] = (
-        f"Asing {word} {_rp(abs(net_foreign) if net_foreign is not None else None)}"
-        + (f" ({netpct:+.1f}% dari nilai transaksi {_rp(total)})" if netpct is not None else "")
-        + f"; net domestik {_rp(net_domestic)}."
+        f"Foreign {word} {_rp(abs(net_foreign) if net_foreign is not None else None)}"
+        + (f" ({netpct:+.1f}% of transaction value {_rp(total)})" if netpct is not None else "")
+        + f"; net domestic {_rp(net_domestic)}."
     )
     return out
 
@@ -299,17 +299,17 @@ def _price_performance_section(sym: str) -> dict[str, Any]:
 
     m1, m3, y1 = by_tf.get("1M"), by_tf.get("3M"), by_tf.get("1Y")
     parts = []
-    for label, v in (("1 bulan", m1), ("3 bulan", m3), ("1 tahun", y1)):
+    for label, v in (("1 month", m1), ("3 months", m3), ("1 year", y1)):
         if v is not None:
             parts.append(f"{label} {v:+.1f}%")
     mom = sum(1 for v in (m1, m3, y1) if v is not None and v > 0)
     neg = sum(1 for v in (m1, m3, y1) if v is not None and v < 0)
     if mom > neg:
-        trend = "momentum harga positif"
+        trend = "positive price momentum"
     elif neg > mom:
-        trend = "momentum harga negatif"
+        trend = "negative price momentum"
     else:
-        trend = "momentum harga campuran"
+        trend = "mixed price momentum"
     conclusion = f"{trend.capitalize()}" + (f" ({', '.join(parts)})." if parts else ".")
 
     return {"available": True, "prices": rows, "conclusion": conclusion}
@@ -355,20 +355,20 @@ def _overall_summary(sym: str, r: dict[str, Any]) -> str:
     pp = r.get("pricePerformance") or {}
     bits = []
     if broker.get("available"):
-        sig = broker.get("signal", "NETRAL").replace("_", " ").lower()
-        bits.append(f"sinyal bandar {sig}")
+        sig = broker.get("signal", "NEUTRAL").replace("_", " ").lower()
+        bits.append(f"bandar signal {sig}")
         fn = broker.get("foreignNet")
         if fn is not None:
-            bits.append(f"net broker asing {_rp(fn)}")
+            bits.append(f"foreign net broker {_rp(fn)}")
     if fd.get("available") and fd.get("netForeign") is not None:
-        bits.append(f"aliran asing {_rp(fd.get('netForeign'))}")
+        bits.append(f"foreign flow {_rp(fd.get('netForeign'))}")
     if pp.get("available"):
         for row in pp.get("prices", []):
             if row.get("timeframe") == "1M" and row.get("pct") is not None:
-                bits.append(f"harga 1 bulan {row['pct']:+.1f}%")
+                bits.append(f"price 1 month {row['pct']:+.1f}%")
                 break
     if not bits:
-        return f"Data Stockbit untuk {sym} belum tersedia pada hari bursa terakhir."
+        return f"Stockbit data for {sym} is not available for the latest trading day."
     return f"{sym}: " + "; ".join(bits) + "."
 
 
