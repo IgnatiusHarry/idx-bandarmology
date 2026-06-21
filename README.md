@@ -148,7 +148,7 @@ Ranking every broker by *how its repeated net-buying of BULL was followed by for
 
 ### Who keeps buying BULL? A governance breadcrumb
 
-The single most persistent net-buyer of BULL in this window is broker code **II**. Publicly available references map this code to **PT Danatama Makmur Sekuritas** — a brokerage **corporately affiliated with the issuer**: the two share members of the same controlling family on their boards (a common President Commissioner), and Danatama-linked entities appear on BULL's public shareholder register.
+The single most persistent net-buyer of BULL in this window is broker code **II**. Public broker-code references map this code to **PT Danatama Makmur Sekuritas**. Based on publicly reported board compositions and shareholder disclosures, this brokerage and the issuer (BULL) have a **reported corporate affiliation** — overlapping membership of the same controlling family at board level, and Danatama-linked entities listed on BULL's public shareholder register. (These are reported public-record relationships; readers should confirm current details against the latest exchange filings.)
 
 > ⚠️ This is an **observational hypothesis, not an allegation.** A broker code identifies the *executing member firm*, not the end client, so it cannot prove who actually traded. There is **no public evidence** that any specific director or insider routed personal trades through this broker. The point is methodological: broker-flow analysis can surface affiliated-party relationships that are worth investigating with proper disclosures — exactly the kind of lead a data pipeline should generate.
 
@@ -160,10 +160,9 @@ Normalized price paths (signal date = 100) for each accumulation event out to +1
 
 ![Event study after signal dates](docs/screenshots/event_study.png)
 
-### Correlation snapshot
+### Broker distribution snapshot
 
-- `bandar_signal_score` vs `back_return_5d`: **0.251** (moderate positive)
-- `foreign_net_flow_pct` vs `back_return_1d`: **0.853** (strong, same-day)
+Net buy (green) vs. net sell (red) by broker on a single day — the cross-section of who is on each side of the tape behind every daily signal.
 
 ![Broker distribution snapshot](docs/screenshots/broker_distribution.png)
 
