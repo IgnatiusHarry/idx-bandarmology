@@ -132,6 +132,22 @@ The dashboard reads the same SQLite warehouse as the notebook, so both views sta
 
 **No Python install?** Open [`docs/dashboard-preview.html`](docs/dashboard-preview.html) for a static, self-contained gallery of the live dashboard's BBCA and BULL views.
 
+## Broker behavioral profiles — smart money vs. retail
+
+Raw broker codes are anonymous, so before anything else the pipeline **groups every executing broker into a behavioral profile** and then nets their flow by group. This is what powers the *"who is really accumulating?"* read — separating conviction money from the crowd:
+
+| Profile | What it represents |
+|---------|--------------------|
+| 🟢 **Foreign Smart Money** | Directional foreign institutions with higher conviction |
+| 🔵 **Local Institutions** | Local funds and institution-like accounts |
+| 🟣 **Market Makers** | Active on both sides — the *net* position is what matters |
+| 🟠 **Speculative Operators** | Higher-risk, momentum / "gorengan"-style participants |
+| ⚪ **Retail-Dominant** | Retail-heavy platforms, often late or contrarian |
+
+In the dashboard, **"Smart Money" = Foreign Smart Money + Local Institutions**. The Overview tab's **Broker profile flow** panel shows net buy/sell for each group on the selected day, and the Broker-Flow tab's **Smart-money daily flow** chart sums only those two smart-money groups.
+
+> These are **heuristic behavioral buckets** inferred from broker-code patterns, not official classifications — they describe how a desk *tends* to trade, not the identity of any end client.
+
 ## Results
 
 Two worked examples, produced by the **same pipeline** against the same SQLite warehouse over **2026-03-31 → 2026-06-19**: **BBCA** (Bank Central Asia — the headline case) and **BULL** (PT Buana Lintas Lautan). Analysing any other stock is just a matter of changing the focused ticker.

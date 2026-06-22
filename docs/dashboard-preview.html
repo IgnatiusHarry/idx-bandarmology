@@ -49,6 +49,14 @@
   a{color:var(--accent); text-decoration:none}
   a:hover{text-decoration:underline}
   .disclaimer{background:rgba(239,68,68,.06); border:1px solid rgba(239,68,68,.25); border-radius:10px; padding:14px 16px; color:var(--muted); font-size:13px; margin-top:20px}
+  .profiles{margin-top:22px; border:1px solid var(--line); border-radius:12px; overflow:hidden}
+  .prow{display:flex; gap:14px; align-items:flex-start; padding:14px 16px; border-bottom:1px solid var(--line); background:var(--panel)}
+  .prow:last-child{border-bottom:0}
+  .dot{flex:0 0 auto; width:12px; height:12px; border-radius:50%; margin-top:6px}
+  .prow .pname{color:var(--strong); font-weight:600}
+  .prow .pdesc{color:var(--muted); font-size:14px}
+  .smart-note{margin-top:14px; color:var(--muted); font-size:14px}
+  .tag.method{background:rgba(168,85,247,.12); color:#c084fc; border:1px solid rgba(168,85,247,.3)}
 </style>
 </head>
 <body>
@@ -111,6 +119,20 @@
       <img src="screenshots/broker_distribution.png" alt="Broker distribution snapshot" />
       <figcaption><b>Broker distribution.</b> Net buyers (green) vs. net sellers (red) on a single day — who is on each side of the tape.</figcaption>
     </figure>
+  </section>
+
+  <section>
+    <span class="tag method">Methodology</span>
+    <h2>Broker behavioral profiles — smart money vs. retail</h2>
+    <p class="lead">Raw broker codes are anonymous, so the pipeline first <b>groups every executing broker into a behavioral profile</b> and then nets their flow by group — that is what powers the "who is really accumulating?" read. <b>"Smart Money" = Foreign Smart Money + Local Institutions.</b></p>
+    <div class="profiles">
+      <div class="prow"><span class="dot" style="background:#22c55e"></span><div><div class="pname">Foreign Smart Money</div><div class="pdesc">Directional foreign institutions with higher conviction</div></div></div>
+      <div class="prow"><span class="dot" style="background:#38bdf8"></span><div><div class="pname">Local Institutions</div><div class="pdesc">Local funds and institution-like accounts</div></div></div>
+      <div class="prow"><span class="dot" style="background:#a855f7"></span><div><div class="pname">Market Makers</div><div class="pdesc">Active on both sides — the net position is what matters</div></div></div>
+      <div class="prow"><span class="dot" style="background:#f59e0b"></span><div><div class="pname">Speculative Operators</div><div class="pdesc">Higher-risk, momentum / "gorengan"-style participants</div></div></div>
+      <div class="prow"><span class="dot" style="background:#8b98a8"></span><div><div class="pname">Retail-Dominant</div><div class="pdesc">Retail-heavy platforms, often late or contrarian</div></div></div>
+    </div>
+    <p class="smart-note">Heuristic behavioral buckets inferred from broker-code patterns — they describe how a desk <i>tends</i> to trade, not the identity of any end client. In the live dashboard, the <b>Broker profile flow</b> panel shows net buy/sell per group for the selected day, and the <b>Smart-money daily flow</b> chart sums only the two smart-money groups.</p>
   </section>
 
   <div class="disclaimer"><b>Not investment advice.</b> A short history, a small watchlist, and multiple-testing risk make these findings exploratory, not production trading signals. Broker codes identify the executing member firm, not the end client; any affiliation note in the README is an observational hypothesis, not an allegation.</div>
