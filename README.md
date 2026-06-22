@@ -98,16 +98,6 @@ cp .env.example .env
 
 Then edit `.env` and set `BROKER_API_TOKEN`.
 
-## About `BROKER_API_TOKEN`
-
-The broker/bandar data comes from a private, authenticated broker-data endpoint, so you need to supply your own session token from an account that already has access. Capture the bearer token your own logged-in session sends to that endpoint, then paste it into `.env`:
-
-```bash
-BROKER_API_TOKEN=your_token_here
-```
-
-Treat this token like a password: keep it private and never commit `.env` (it is already in `.gitignore`). Without the token, price data still loads, but broker and bandar data are skipped.
-
 ## Main workflow: notebook
 
 ```bash
