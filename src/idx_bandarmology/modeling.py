@@ -106,7 +106,8 @@ def linear_regression(feat: pd.DataFrame, target_col: str = "back_return_5d",
     sm = _require_statsmodels()
     X = sm.add_constant(data[cols])
     y = data[target_col]
-    model = sm.OLS(y, X).fit()
+    # Use Newey-West HAC standard errors for time series robustness
+    model = sm.OLS(y, X).fit(cov_type='HAC', cov_kwds={'maxlags': 1})
 
     coef_df = pd.DataFrame({
         "feature": X.columns,
@@ -252,7 +253,7 @@ def forecast_latest(
     y_train = train[target_col]
     X_latest = latest[cols]
 
-    ols = sm.OLS(y_train, sm.add_constant(X_train, has_constant="add")).fit()
+    ols = sm.OLS(y_train, sm.add_constant(X_train, has_constant="add")).fit(cov_type='HAC', cov_kwds={'maxlags': 1})
     latest["ols_expected_return"] = ols.predict(sm.add_constant(X_latest, has_constant="add"))
     latest["ols_predicted_close"] = latest["close"] * (1.0 + latest["ols_expected_return"])
 

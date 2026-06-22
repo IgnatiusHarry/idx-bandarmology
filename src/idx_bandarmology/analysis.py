@@ -24,6 +24,31 @@ _RETURN_COLS = [
     "fwd_return_1d", "fwd_return_3d", "fwd_return_5d", "fwd_return_10d",
 ]
 
+_BROKER_PROFILES: dict[str, str] = {}
+for _codes, _profile in (
+    (("AK", "BK", "MS", "GR", "LG", "KZ", "CS", "DX"), "smart_foreign"),
+    (("SQ", "MG", "EP", "DR", "BZ"), "bandar_gorengan"),
+    (("XA", "AZ", "KI", "YO", "ZP"), "retail"),
+    (("CC", "NI", "OD", "TP", "IF"), "local_institutional"),
+    (("YU", "RX", "PD"), "market_maker"),
+):
+    for _code in _codes:
+        _BROKER_PROFILES[_code] = _profile
+
+_PROFILE_META: dict[str, tuple[str, str]] = {
+    "smart_foreign": ("Foreign Smart Money", "Directional foreign institutions with higher conviction"),
+    "local_institutional": ("Local Institutions", "Local funds and institution-like accounts"),
+    "market_maker": ("Market Makers", "Often active on both sides; net position matters"),
+    "bandar_gorengan": ("Speculative Operators", "Potential pump-and-dump style participants"),
+    "retail": ("Retail-Dominant", "Retail-heavy platforms, often late or contrarian"),
+    "lainnya": ("Other Brokers", "Brokers outside the defined behavioral profiles"),
+}
+_SMART_PROFILES = ("smart_foreign", "local_institutional")
+
+
+def broker_profile_of(code: str | None) -> str:
+    return _BROKER_PROFILES.get((code or "").upper(), "lainnya")
+
 
 def _forward_return_frame(tickers: list[str] | None = None, horizons: tuple[int, ...] = (1, 3, 5, 10)) -> pd.DataFrame:
     price_df = storage.read_prices(tickers)
@@ -33,6 +58,147 @@ def _forward_return_frame(tickers: list[str] | None = None, horizons: tuple[int,
     for h in horizons:
         df[f"fwd_return_{h}d"] = df.groupby("ticker")["close"].shift(-h) / df["close"] - 1.0
     return df[["ticker", "date", "close", *[f"fwd_return_{h}d" for h in horizons]]]
+
+
+def broker_profile_flow_table(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
+    """Net broker flow grouped by behavioral profile."""
+    activity = storage.read_broker_activity([ticker])
+    if activity.empty:
+        return pd.DataFrame()
+    cutoff = activity["date"].max() - pd.Timedelta(days=lookback_days)
+    sub = activity[activity["date"] >= cutoff].copy()
+    if sub.empty:
+        return pd.DataFrame()
+    sub["profile"] = sub["broker_code"].map(broker_profile_of)
+
+    broker_rows = (
+        sub.groupby(["profile", "broker_code", "participant_type"], dropna=False)
+        .agg(
+            net=("net_value", "sum"),
+            buy=("buy_value", "sum"),
+            sell=("sell_value", "sum"),
+            days=("date", "nunique"),
+        )
+        .reset_index()
+    )
+    totals = (
+        broker_rows.groupby("profile", dropna=False)
+        .agg(net=("net", "sum"), buy=("buy", "sum"), sell=("sell", "sum"), days=("days", "max"))
+        .reset_index()
+    )
+    rows = []
+    for profile in _PROFILE_META:
+        total = totals[totals["profile"] == profile]
+        members = broker_rows[broker_rows["profile"] == profile].copy()
+        if total.empty and members.empty:
+            continue
+        label, characteristic = _PROFILE_META[profile]
+        members["abs_net"] = members["net"].abs()
+        top_members = members.sort_values("abs_net", ascending=False).head(6)
+        rows.append({
+            "profile": profile,
+            "label": label,
+            "characteristic": characteristic,
+            "net": float(total["net"].iloc[0]) if not total.empty else 0.0,
+            "buy": float(total["buy"].iloc[0]) if not total.empty else 0.0,
+            "sell": float(total["sell"].iloc[0]) if not total.empty else 0.0,
+            "top_brokers": top_members[["broker_code", "participant_type", "net"]].to_dict("records"),
+        })
+    return pd.DataFrame(rows)
+
+
+def smart_money_daily_flow(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
+    """Daily smart-money net flow and cumulative net flow."""
+    activity = storage.read_broker_activity([ticker])
+    if activity.empty:
+        return pd.DataFrame()
+    cutoff = activity["date"].max() - pd.Timedelta(days=lookback_days)
+    sub = activity[activity["date"] >= cutoff].copy()
+    if sub.empty:
+        return pd.DataFrame()
+    sub["profile"] = sub["broker_code"].map(broker_profile_of)
+    smart = sub[sub["profile"].isin(_SMART_PROFILES)]
+    if smart.empty:
+        return pd.DataFrame()
+    daily = smart.groupby("date")["net_value"].sum().reset_index(name="smart_net").sort_values("date")
+    daily["cumulative_net"] = daily["smart_net"].cumsum()
+    return daily.reset_index(drop=True)
+
+
+def plot_smart_money_daily_flow(ticker: str, lookback_days: int = 30) -> plt.Figure:
+    daily = smart_money_daily_flow(ticker, lookback_days=lookback_days)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 5.5), sharex=True, gridspec_kw={"height_ratios": [2, 1]})
+    if daily.empty:
+        ax1.text(0.5, 0.5, "No smart-money daily flow available.", ha="center", va="center")
+        ax1.set_axis_off()
+        ax2.set_axis_off()
+        return fig
+    colors = np.where(daily["smart_net"] >= 0, "#10b981", "#e11d48")
+    ax1.bar(daily["date"], daily["smart_net"] / 1e9, color=colors, width=0.8)
+    ax1.axhline(0, color="#64748b", linewidth=0.8)
+    ax1.set_ylabel("Daily net (Rp B)")
+    ax1.set_title(f"{ticker.upper()} - smart-money daily flow")
+    ax1.grid(axis="y", alpha=0.15)
+
+    ax2.plot(daily["date"], daily["cumulative_net"] / 1e9, color="#e11d48", linewidth=1.8)
+    ax2.axhline(0, color="#64748b", linewidth=0.8)
+    ax2.set_ylabel("Cumulative (Rp B)")
+    ax2.grid(axis="y", alpha=0.15)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
+def price_performance_table(ticker: str) -> pd.DataFrame:
+    """Multi-timeframe close-to-close returns from stored prices."""
+    price_df = storage.read_prices([ticker]).sort_values("date")
+    if price_df.empty:
+        return pd.DataFrame()
+    latest = price_df.iloc[-1]
+    rows = []
+    windows = [
+        ("1D", 1), ("1W", 5), ("1M", 21), ("3M", 63), ("6M", 126),
+        ("1Y", 252), ("3Y", 756), ("5Y", 1260), ("10Y", 2520),
+    ]
+    for label, periods in windows:
+        if len(price_df) > periods:
+            base = price_df.iloc[-periods - 1]["close"]
+            ret = latest["close"] / base - 1 if base else np.nan
+        else:
+            ret = np.nan
+        rows.append({"timeframe": label, "return": ret})
+
+    ytd = np.nan
+    same_year = price_df[price_df["date"].dt.year == latest["date"].year]
+    if len(same_year) > 1:
+        first = same_year.iloc[0]["close"]
+        ytd = latest["close"] / first - 1 if first else np.nan
+    rows.insert(5, {"timeframe": "YTD", "return": ytd})
+    return pd.DataFrame(rows)
+
+
+def latest_signal_components(ticker: str) -> dict[str, object]:
+    """Latest aggregate signal and headline net values."""
+    flow = storage.read_broker_flow([ticker]).sort_values("date")
+    if flow.empty:
+        return {}
+    row = flow.iloc[-1].to_dict()
+    return row
+
+
+def top_net_broker_summary(ticker: str, trade_date: pd.Timestamp | str | None = None, top_n: int = 6) -> tuple[pd.DataFrame, pd.DataFrame]:
+    activity = storage.read_broker_activity([ticker])
+    if activity.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    if trade_date is None:
+        trade_date = activity["date"].max()
+    trade_date = pd.to_datetime(trade_date)
+    sub = activity[(activity["date"] == trade_date) & (activity["ticker"] == ticker.upper())].copy()
+    if sub.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    buyers = sub[sub["net_value"] > 0].sort_values("net_value", ascending=False).head(top_n)
+    sellers = sub[sub["net_value"] < 0].sort_values("net_value", ascending=True).head(top_n)
+    return buyers.reset_index(drop=True), sellers.reset_index(drop=True)
 
 
 def broker_distribution_table(ticker: str, trade_date: pd.Timestamp | str | None = None, top_n: int = 10) -> pd.DataFrame:
@@ -246,7 +412,7 @@ def plot_signal_vs_return(feat: pd.DataFrame, horizon: int = 5,
     fig, ax = plt.subplots(figsize=(7, 5))
     sns.regplot(data=sub, x=signal_col, y=target_col, ax=ax,
                 scatter_kws={"alpha": 0.5, "s": 25}, line_kws={"color": "crimson"})
-    ax.set_xlabel("Bandar signal score (today)")
+    ax.set_xlabel("Smart-money signal score (today)")
     ax.set_ylabel(f"{'Historical' if prefix == 'back' else 'Forward'} return, {horizon}d")
     ax.set_title(f"Smart money signal vs {horizon}-day {'historical' if prefix == 'back' else 'forward'} return")
     ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
@@ -273,9 +439,9 @@ def plot_signal_bucket_returns(feat: pd.DataFrame, target_col: str = "back_retur
     sns.boxplot(data=sub, x="bandar_signal", y=target_col, order=present, hue="bandar_signal",
                 palette="RdYlGn", legend=False, ax=ax)
     ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
-    ax.set_xlabel("Bandar signal")
+    ax.set_xlabel("Smart-money signal")
     ax.set_ylabel(target_col)
-    ax.set_title("Return distribution by bandar signal")
+    ax.set_title("Return distribution by smart-money signal")
     plt.setp(ax.get_xticklabels(), rotation=20, ha="right")
     fig.tight_layout()
     return fig
@@ -305,8 +471,8 @@ def plot_price_with_signal(feat: pd.DataFrame, ticker: str) -> plt.Figure:
         colors = sub["bandar_signal"].map(color_map).fillna("#cccccc")
         has_signal = sub["bandar_signal"].notna()
         ax.scatter(sub.loc[has_signal, "date"], sub.loc[has_signal, "close"],
-                   c=colors[has_signal], s=40, zorder=3, label="Bandar signal")
-    ax.set_title(f"{ticker} - price and bandar signal")
+                   c=colors[has_signal], s=40, zorder=3, label="Smart-money signal")
+    ax.set_title(f"{ticker} - price and smart-money signal")
     ax.set_ylabel("Close price (Rp)")
     fig.autofmt_xdate()
     fig.tight_layout()
@@ -514,3 +680,165 @@ def plot_event_study(
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
     return fig
+
+
+
+def _make_stationary(series: pd.Series) -> pd.Series:
+    """Check stationarity using ADF test and apply first difference if non-stationary (p > 0.05)."""
+    import warnings
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    try:
+        from statsmodels.tsa.stattools import adfuller
+        if series.std() == 0 or len(series.dropna()) < 10:
+            return series
+        p_val = adfuller(series.dropna())[1]
+        if p_val > 0.05:
+            return series.diff()
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return series
+
+
+def causality_foreign_vs_price(ticker: str, max_lags: int = 5) -> dict[str, object] | None:
+    """Test if foreign net flow Granger-causes price returns."""
+    import warnings
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    try:
+        from statsmodels.tsa.stattools import grangercausalitytests
+    except ImportError:
+        return None
+        
+    prices = storage.read_prices([ticker]).sort_values("date")
+    flow = storage.read_broker_flow([ticker]).sort_values("date")
+    
+    if prices.empty or flow.empty:
+        return None
+        
+    df = pd.merge(prices[["date", "close"]], flow[["date", "foreign_net_broker"]], on="date", how="inner")
+    df["return"] = _make_stationary(df["close"].pct_change())
+    df["foreign_net_broker"] = _make_stationary(df["foreign_net_broker"])
+    df = df.dropna(subset=["return", "foreign_net_broker"])
+    
+    if len(df) < max_lags * 3 + 2:
+        return None
+        
+    data = df[["return", "foreign_net_broker"]].values
+    try:
+        results = grangercausalitytests(data, maxlag=max_lags, verbose=False)
+        p_values = {lag: results[lag][0]["ssr_ftest"][1] for lag in range(1, max_lags + 1)}
+        min_p = min(p_values.values())
+        best_lag = [lag for lag, p in p_values.items() if p == min_p][0]
+        
+        return {
+            "ticker": ticker,
+            "best_lag": best_lag,
+            "min_p_value": min_p,
+            "is_significant": bool(min_p < 0.05),
+            "n_obs": len(df)
+        }
+    except Exception:
+        return None
+
+
+def causality_by_participant(ticker: str, max_lags: int = 5) -> pd.DataFrame:
+    """Test which participant types (Asing, Lokal, Pemerintah) Granger-cause price returns."""
+    import warnings
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    try:
+        from statsmodels.tsa.stattools import grangercausalitytests
+    except ImportError:
+        return pd.DataFrame()
+
+    prices = storage.read_prices([ticker]).sort_values("date")
+    activity = storage.read_broker_activity([ticker]).sort_values("date")
+    
+    if prices.empty or activity.empty:
+        return pd.DataFrame()
+        
+    prices["return"] = prices["close"].pct_change()
+    # Group by date and participant_type
+    grouped = activity.groupby(["date", "participant_type"])["net_value"].sum().reset_index()
+    
+    results_list = []
+    for ptype in grouped["participant_type"].dropna().unique():
+        sub = grouped[grouped["participant_type"] == ptype]
+        df = pd.merge(prices[["date", "return"]], sub[["date", "net_value"]], on="date", how="inner")
+        df["return"] = _make_stationary(df["return"])
+        df["net_value"] = _make_stationary(df["net_value"])
+        df = df.dropna()
+        if len(df) < max_lags * 3 + 2:
+            continue
+            
+        data = df[["return", "net_value"]].values
+        try:
+            res = grangercausalitytests(data, maxlag=max_lags, verbose=False)
+            p_vals = {lag: res[lag][0]["ssr_ftest"][1] for lag in range(1, max_lags + 1)}
+            min_p = min(p_vals.values())
+            best_lag = [lag for lag, p in p_vals.items() if p == min_p][0]
+            results_list.append({
+                "participant_type": ptype,
+                "best_lag": best_lag,
+                "p_value": min_p,
+                "significant": bool(min_p < 0.05)
+            })
+        except Exception:
+            pass
+            
+    if not results_list:
+        return pd.DataFrame()
+    return pd.DataFrame(results_list).sort_values("p_value")
+
+
+def causality_by_broker(ticker: str, top_n: int = 20, max_lags: int = 5) -> pd.DataFrame:
+    """Test which specific brokers Granger-cause price returns."""
+    import warnings
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    try:
+        from statsmodels.tsa.stattools import grangercausalitytests
+    except ImportError:
+        return pd.DataFrame()
+
+    prices = storage.read_prices([ticker]).sort_values("date")
+    activity = storage.read_broker_activity([ticker]).sort_values("date")
+    
+    if prices.empty or activity.empty:
+        return pd.DataFrame()
+        
+    prices["return"] = prices["close"].pct_change()
+    
+    # Filter top brokers by absolute net value to save computation
+    top_brokers = activity.assign(abs_net=activity["net_value"].abs()).groupby("broker_code")["abs_net"].sum().sort_values(ascending=False).head(top_n).index
+
+    grouped = activity[activity["broker_code"].isin(top_brokers)].groupby(["date", "broker_code"])["net_value"].sum().reset_index()
+    
+    results_list = []
+    for broker in grouped["broker_code"].unique():
+        sub = grouped[grouped["broker_code"] == broker]
+        df = pd.merge(prices[["date", "return"]], sub[["date", "net_value"]], on="date", how="inner")
+        df["return"] = _make_stationary(df["return"])
+        df["net_value"] = _make_stationary(df["net_value"])
+        df = df.dropna()
+        # Ensure we have enough data and variation
+        if len(df) < max_lags * 3 + 2 or df["net_value"].std() == 0:
+            continue
+            
+        data = df[["return", "net_value"]].values
+        try:
+            res = grangercausalitytests(data, maxlag=max_lags, verbose=False)
+            p_vals = {lag: res[lag][0]["ssr_ftest"][1] for lag in range(1, max_lags + 1)}
+            min_p = min(p_vals.values())
+            best_lag = [lag for lag, p in p_vals.items() if p == min_p][0]
+            results_list.append({
+                "broker_code": broker,
+                "best_lag": best_lag,
+                "p_value": min_p,
+                "significant": bool(min_p < 0.05)
+            })
+        except Exception:
+            pass
+            
+    if not results_list:
+        return pd.DataFrame()
+    return pd.DataFrame(results_list).sort_values("p_value")
