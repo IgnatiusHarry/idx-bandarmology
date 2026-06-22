@@ -51,7 +51,7 @@ And the first real lesson it taught me: **the biggest broker is not the most pre
 ```mermaid
 flowchart LR
     yf["yfinance<br/>(OHLCV prices)"] --> pipe
-    broker["Broker API<br/>(broker / smart money)"] --> pipe
+    broker["Broker-flow data <br/>(smart money)"] --> pipe
     pipe["pipeline<br/>scrape → clean → store"] --> db[("SQLite<br/>analytics warehouse")]
     db --> consume["notebook /<br/>Streamlit dashboard"]
     db --> model["features → analysis →<br/>modeling + causality<br/>(OLS · logistic · random forest ·<br/>Granger causality · event study)"]
