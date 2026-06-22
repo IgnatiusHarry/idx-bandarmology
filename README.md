@@ -36,7 +36,7 @@ Broker flow and "bandar detector" data are usually locked behind paid platforms 
 ```mermaid
 flowchart LR
     yf["yfinance<br/>(OHLCV prices)"] --> pipe
-    broker["Broker API<br/>(broker / smart money)"] --> pipe
+    broker["Broker API<br/>(smart money)"] --> pipe
     pipe["pipeline<br/>scrape → clean → store"] --> db[("SQLite<br/>analytics warehouse")]
     db --> consume["notebook /<br/>Streamlit dashboard"]
     db --> model["features → analysis →<br/>modeling + causality<br/>(OLS · logistic · random forest ·<br/>Granger causality · event study)"]
