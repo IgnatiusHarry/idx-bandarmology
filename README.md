@@ -158,13 +158,19 @@ Bank Central Asia (**BBCA**) sold off from ~Rp 6,350 in late April to a trough n
 
 ![BBCA price and broker-signal window](docs/screenshots/bbca_price_signal.png)
 
+> 📖 **In plain words:** the top line is BBCA's share price; the coloured dots underneath are the daily verdict — **red = big players selling, green = big players buying**. The dots flip to green right as the price hits bottom and starts climbing again.
+
 The broker money flow adds a more cautious second layer. Cumulative broker net flow stayed **deeply negative** across the window — drifting to roughly **−Rp 2.8 trillion** by 2026-06-19 even as price recovered — punctuated by only brief green accumulation bursts (e.g. around 2026-05-22). On the final signal day, **foreign desks net bought (+Rp 43.62 B)** while **local desks net sold (−Rp 176.58 B)**: foreign money quietly accumulating into domestic selling.
 
 ![BBCA daily and cumulative broker net flow](docs/screenshots/bbca_broker_flow.png)
 
+> 📖 **In plain words:** the bars show how much brokers bought (green) or sold (red) each day; the line is the running total. Even though the price recovered, the line keeps sliding down — so across the whole period brokers were net **sellers**, not buyers.
+
 The event study keeps the finding honest. Individual accumulation events — especially the **Strong Accumulation** prints on 2026-06-12 and 2026-06-15 — popped **+5–8% within 1–3 days**. But the **average path** (dashed) only hovers near the signal level through +3 days before **fading to roughly −9% by +10 days**: the short-term bump is real, a durable 10-day edge is not. A signal to act on quickly, not to hold blindly.
 
 ![BBCA event study after accumulation signals](docs/screenshots/bbca_event_study.png)
+
+> 📖 **In plain words:** every "buy" signal is lined up at the same starting point (day 0 = 100) to see what the price did next. Prices often jumped in the first few days, but **on average drifted back down by day 10** — a quick bounce, not a lasting climb.
 
 ### Second case — switch the ticker to BULL: when the aggregate signal misleads
 
@@ -173,6 +179,8 @@ Point the same pipeline at **BULL** (243 price rows, 105 broker-flow rows, 3,353
 BULL rose **+17.18% over 5 days** and **+15.06% over 10 days** — while its *latest aggregate* "bandar" signal read **Strong Distribution** (i.e. bearish). The headline label was pointing the wrong way. The useful information was one level down, in **individual broker behaviour**.
 
 ![Price with smart-money signal overlays](docs/screenshots/price_signal_overlay.png)
+
+> 📖 **In plain words:** BULL's price with the same buy/sell signal dots. Here the single headline verdict said "selling" **even while the price kept rising** — proof that the one-line summary can point the wrong way, and you have to look deeper.
 
 ### Not all brokers are equal — volume ≠ skill
 
@@ -189,6 +197,8 @@ Ranking every broker by *how its repeated net-buying of BULL was followed by for
 
 ![Broker accumulation scanner — systematic screening across brokers](docs/screenshots/broker_scanner.png)
 
+> 📖 **In plain words:** a scoreboard that ranks each broker by whether their buying was *actually* followed by price gains. It automatically separates brokers with a real track record from the ones that are just noise.
+
 ### Who keeps buying BULL? Connecting the flow to the "bandar"
 
 Look past win rate for a second and just ask *who shows up over and over*. Broker code **II** net-bought BULL on **38 separate trading days** in this window — by far the most **persistent** accumulator on the stock. It is the steadily climbing red (II) line in the broker-flow chart below: it keeps adding even while price chops sideways and other brokers flip in and out. That relentless, price-insensitive buying is the classic fingerprint of a **"bandar"** — a large, patient operator quietly building a position rather than chasing momentum.
@@ -201,17 +211,23 @@ So who is behind that code? Public broker-code references map **II** to **PT Dan
 
 ![Broker flow by daily net accumulation](docs/screenshots/broker_flow_accumulation.png)
 
+> 📖 **In plain words:** each line is one broker's running total of buying. A line that keeps climbing steadily is a player quietly building a big position day after day — the classic fingerprint of a **"bandar"** (a large operator).
+
 ### Event study: what happens after an accumulation signal?
 
 Normalized price paths (signal date = 100) for each accumulation event out to +10 days, with the **average path** in black. The average drifts **above 100 through the +5-day horizon**, consistent with a short-lived post-accumulation bump rather than a durable trend.
 
 ![Event study after signal dates](docs/screenshots/event_study.png)
 
+> 📖 **In plain words:** same idea as the BBCA version — all buy signals lined up at day 0 to see the average price path afterwards. For BULL the average line stays **above** the start, so a short-term gain tended to follow.
+
 ### Broker distribution snapshot
 
 Net buy (green) vs. net sell (red) by broker on a single day — the cross-section of who is on each side of the tape behind every daily signal.
 
 ![Broker distribution snapshot](docs/screenshots/broker_distribution.png)
+
+> 📖 **In plain words:** a single day's snapshot of who bought (green) versus who sold (red), broker by broker — the cast of characters behind that day's signal.
 
 > Scope & reproducibility: these are a snapshot from the BULL analysis (2026-03-31 → 2026-06-19) produced by `notebooks/01_bandarmology_end_to_end.ipynb` and `dashboard/app.py` against the same SQLite warehouse. A short history, a small watchlist, and multiple-testing risk make these findings **exploratory, not production trading signals** — re-running on a longer history will shift the exact numbers. See the Disclaimer at the bottom.
 
