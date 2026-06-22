@@ -254,6 +254,31 @@ def _md_range(sym: str, frm: str, to: str) -> dict[str, Any]:
     return _get(f"/marketdetectors/{sym}?from={frm}&to={to}").get("data", {}) or {}
 
 
+def fetch_broker_distribution(
+    ticker: str,
+    trade_date: str | date | datetime,
+    end_date: str | date | datetime | None = None,
+    investor_type: str = "INVESTOR_TYPE_ALL",
+    market_board: str = "MARKET_TYPE_REGULER",
+    data_type: str = "BROKER_DISTRIBUTION_DATA_TYPE_VALUE",
+) -> dict[str, Any]:
+    """Fetch broker-to-broker distribution graph from Stockbit order-trade API."""
+    start_iso = _parse_date(trade_date).isoformat()
+    end_iso = _parse_date(end_date or trade_date).isoformat()
+    sym = _sym(ticker)
+    path = (
+        "/order-trade/broker/distribution"
+        f"?date=&symbol={sym}"
+        f"&investor_type={investor_type}"
+        f"&market_board={market_board}"
+        f"&data_type={data_type}"
+        f"&from={start_iso}&to={end_iso}"
+    )
+    key = f"broker_distribution:{sym}:{start_iso}:{end_iso}:{investor_type}:{market_board}:{data_type}"
+    resp = _cached(key, lambda: _get(path))
+    return (resp or {}).get("data", {}) or {}
+
+
 def _broker_activity_rows(sym: str, md: dict[str, Any], fetched_at: str) -> list[dict[str, Any]]:
     """Flatten Stockbit broker_summary into one row per broker."""
     bs = md.get("broker_summary") or {}

@@ -16,7 +16,7 @@ import streamlit as st
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 
-from idx_bandarmology import analysis, pipeline, storage  # noqa: E402
+from idx_bandarmology import analysis, broker_api, pipeline, storage  # noqa: E402
 
 
 PROFILE_META = {
@@ -189,6 +189,11 @@ def cached_broker_scan(tickers: tuple[str, ...], horizon: int, min_events: int, 
         min_net_value=min_net_value,
         group_by=("ticker", "broker_code"),
     )
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_broker_distribution_api(ticker: str, start_date: pd.Timestamp, end_date: pd.Timestamp) -> dict[str, object]:
+    return broker_api.fetch_broker_distribution(ticker, start_date, end_date=end_date)
 
 
 def label_component(signal: object) -> float:
@@ -600,8 +605,10 @@ def interactive_broker_compare(activity: pd.DataFrame, broker_codes: list[str], 
             )
         )
     fig.add_hline(y=0, line_width=1, line_color="#94a3b8")
-    fig.update_yaxes(title="Net Value, Rp B")
-    return plotly_layout(fig, 360, "Broker Flow Comparison")
+    y_title = "Cumulative Net Value, Rp B" if mode == "Cumulative" else "Daily Net Value, Rp B"
+    fig.update_yaxes(title=y_title)
+    title = "Broker Flow Comparison, Cumulative in Selected Window" if mode == "Cumulative" else "Broker Flow Comparison, Daily Net by Date"
+    return plotly_layout(fig, 360, title)
 
 
 def interactive_smart_flow(daily: pd.DataFrame) -> go.Figure:
@@ -708,7 +715,7 @@ def top_broker_compact_table(top_buy: pd.DataFrame, top_sell: pd.DataFrame, acti
                     "Side": side,
                     "Broker": row.broker_code,
                     "Type": participant_label(row.participant_type),
-                    "Net": row.net_value,
+                    "Net on Analysis Date": row.net_value,
                     "5D Flow": sparkline_values(activity, row.broker_code, end_ts),
                 }
             )
@@ -750,6 +757,244 @@ def profile_broker_detail_table(activity: pd.DataFrame, profile_key: str | None 
     grouped["Avg Value / Tx"] = grouped.apply(lambda r: abs(float(r["Net"] or 0)) / max(float(r["Freq"] or 0), 1), axis=1)
     grouped = grouped.sort_values(["Profile", "Net"], ascending=[True, False])
     return grouped[["Profile", "Broker", "Type", "Buy", "Sell", "Net", "Freq", "Days", "Avg Value / Tx"]].reset_index(drop=True)
+
+
+def participant_color(label: str) -> str:
+    return {
+        "FOREIGN": "#dc3545",
+        "LOCAL": "#7c3aed",
+        "GOV": "#0f9f6e",
+    }.get(label, "#94a3b8")
+
+
+def rgba_from_hex(hex_color: str, alpha: float) -> str:
+    hex_color = hex_color.lstrip("#")
+    if len(hex_color) != 6:
+        return f"rgba(148,163,184,{alpha})"
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def estimated_broker_paths(dist: pd.DataFrame, top_n: int = 8) -> pd.DataFrame:
+    if dist.empty:
+        return pd.DataFrame()
+    buyers = dist[dist["net_value"] > 0].copy().sort_values("net_value", ascending=False).head(top_n)
+    sellers = dist[dist["net_value"] < 0].copy().sort_values("net_value", ascending=True).head(top_n)
+    if buyers.empty or sellers.empty:
+        return pd.DataFrame()
+
+    buyers["remaining"] = buyers["net_value"].astype(float)
+    sellers["remaining"] = sellers["net_value"].abs().astype(float)
+    edges: list[dict[str, object]] = []
+    seller_idx = 0
+    seller_rows = sellers.reset_index(drop=True)
+    buyer_rows = buyers.reset_index(drop=True)
+
+    for buyer_i in range(len(buyer_rows)):
+        buyer_left = float(buyer_rows.loc[buyer_i, "remaining"])
+        while buyer_left > 1e-9 and seller_idx < len(seller_rows):
+            seller_left = float(seller_rows.loc[seller_idx, "remaining"])
+            if seller_left <= 1e-9:
+                seller_idx += 1
+                continue
+            matched = min(buyer_left, seller_left)
+            edges.append(
+                {
+                    "buyer_code": buyer_rows.loc[buyer_i, "broker_code"],
+                    "buyer_type": participant_label(buyer_rows.loc[buyer_i, "participant_type"]),
+                    "seller_code": seller_rows.loc[seller_idx, "broker_code"],
+                    "seller_type": participant_label(seller_rows.loc[seller_idx, "participant_type"]),
+                    "matched_value": matched,
+                }
+            )
+            buyer_left -= matched
+            seller_rows.loc[seller_idx, "remaining"] = seller_left - matched
+            if seller_rows.loc[seller_idx, "remaining"] <= 1e-9:
+                seller_idx += 1
+        buyer_rows.loc[buyer_i, "remaining"] = buyer_left
+    return pd.DataFrame(edges)
+
+
+def exact_broker_paths(distribution_data: dict[str, object], top_n: int = 8) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    by_value = (distribution_data or {}).get("by_value") or {}
+    for buyer in (by_value.get("top_broker_buy") or [])[:top_n]:
+        detail = buyer.get("detail") or {}
+        for counterparty in buyer.get("distribute_to") or []:
+            rows.append(
+                {
+                    "buyer_code": detail.get("code"),
+                    "buyer_type": participant_label(detail.get("type")),
+                    "seller_code": counterparty.get("code"),
+                    "seller_type": participant_label(counterparty.get("type")),
+                    "matched_value": float(counterparty.get("amount") or 0),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def broker_distribution_sankey(
+    dist: pd.DataFrame,
+    trade_date: pd.Timestamp,
+    distribution_data: dict[str, object] | None = None,
+    top_n: int = 8,
+) -> go.Figure:
+    fig = go.Figure()
+    paths = exact_broker_paths(distribution_data or {}, top_n=top_n)
+    exact_mode = not paths.empty
+    if paths.empty:
+        paths = estimated_broker_paths(dist, top_n=top_n)
+    if paths.empty:
+        return plotly_layout(fig, 420, "Broker Distribution")
+
+    buyer_nodes = []
+    seller_nodes = []
+    node_labels = []
+    node_colors = []
+    node_index: dict[str, int] = {}
+
+    for side, code_col, type_col in (("B", "buyer_code", "buyer_type"), ("S", "seller_code", "seller_type")):
+        source_df = paths[[code_col, type_col]].drop_duplicates().reset_index(drop=True)
+        for row in source_df.itertuples(index=False):
+            code = getattr(row, code_col)
+            type_label = getattr(row, type_col)
+            key = f"{side}:{code}"
+            node_index[key] = len(node_labels)
+            node_labels.append(code)
+            node_colors.append(participant_color(type_label))
+            if side == "B":
+                buyer_nodes.append(key)
+            else:
+                seller_nodes.append(key)
+
+    sources = []
+    targets = []
+    values = []
+    link_colors = []
+    custom = []
+    for row in paths.itertuples(index=False):
+        s_key = f"B:{row.buyer_code}"
+        t_key = f"S:{row.seller_code}"
+        sources.append(node_index[s_key])
+        targets.append(node_index[t_key])
+        values.append(float(row.matched_value) / 1e9)
+        color = participant_color(row.buyer_type)
+        link_colors.append(rgba_from_hex(color, 0.35))
+        custom.append([row.buyer_code, row.seller_code, fmt_rp(row.matched_value)])
+
+    fig.add_trace(
+        go.Sankey(
+            arrangement="snap",
+            node=dict(
+                pad=16,
+                thickness=12,
+                line=dict(color="#d9e2ec", width=0.5),
+                label=node_labels,
+                color=node_colors,
+                hovertemplate="%{label}<extra></extra>",
+            ),
+            link=dict(
+                source=sources,
+                target=targets,
+                value=values,
+                color=link_colors,
+                customdata=custom,
+                hovertemplate="Buyer %{customdata[0]}<br>Seller %{customdata[1]}<br>Estimated matched value %{customdata[2]}<extra></extra>",
+            ),
+        )
+    )
+    fig.add_annotation(x=0.02, y=1.05, xref="paper", yref="paper", text="Buyers", showarrow=False, font=dict(color="#0f9f6e", size=12))
+    fig.add_annotation(x=0.98, y=1.05, xref="paper", yref="paper", text="Sellers", showarrow=False, font=dict(color="#dc3545", size=12), xanchor="right")
+    api_start = (distribution_data or {}).get("start_date")
+    api_end = (distribution_data or {}).get("end_date")
+    if api_start and api_end:
+        date_label = f"{api_start} to {api_end}" if api_start != api_end else str(api_end)
+    else:
+        date_label = f"{trade_date:%Y-%m-%d}"
+    title = (
+        f"Broker Distribution, Exact API Counterparties on {date_label}"
+        if exact_mode
+        else f"Broker Distribution, Estimated Matching on {date_label}"
+    )
+    return plotly_layout(fig, 430, title)
+
+
+def broker_summary_table(dist: pd.DataFrame, distribution_data: dict[str, object] | None = None, top_n: int = 10) -> pd.DataFrame:
+    by_value = (distribution_data or {}).get("by_value") or {}
+    if by_value.get("top_broker_buy") or by_value.get("top_broker_sell"):
+        buy_rows = by_value.get("top_broker_buy") or []
+        sell_rows = by_value.get("top_broker_sell") or []
+        rows: list[dict[str, object]] = []
+        max_len = max(len(buy_rows), len(sell_rows), 0)
+        for i in range(min(max_len, top_n)):
+            row: dict[str, object] = {}
+            if i < len(buy_rows):
+                b = buy_rows[i].get("detail") or {}
+                row.update(
+                    {
+                        "Buy Broker": b.get("code", ""),
+                        "Buy Type": participant_label(b.get("type")),
+                        "Buy Value": b.get("amount"),
+                        "Buy Lot": np.nan,
+                        "Buy Avg": np.nan,
+                    }
+                )
+            else:
+                row.update({"Buy Broker": "", "Buy Type": "", "Buy Value": np.nan, "Buy Lot": np.nan, "Buy Avg": np.nan})
+            if i < len(sell_rows):
+                s = sell_rows[i].get("detail") or {}
+                row.update(
+                    {
+                        "Sell Broker": s.get("code", ""),
+                        "Sell Type": participant_label(s.get("type")),
+                        "Sell Value": s.get("amount"),
+                        "Sell Lot": np.nan,
+                        "Sell Avg": np.nan,
+                    }
+                )
+            else:
+                row.update({"Sell Broker": "", "Sell Type": "", "Sell Value": np.nan, "Sell Lot": np.nan, "Sell Avg": np.nan})
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    if dist.empty:
+        return pd.DataFrame()
+    buyers = dist[dist["net_value"] > 0].copy().sort_values("net_value", ascending=False).head(top_n).reset_index(drop=True)
+    sellers = dist[dist["net_value"] < 0].copy().sort_values("net_value", ascending=True).head(top_n).reset_index(drop=True)
+    rows: list[dict[str, object]] = []
+    max_len = max(len(buyers), len(sellers))
+    for i in range(max_len):
+        row: dict[str, object] = {}
+        if i < len(buyers):
+            b = buyers.iloc[i]
+            row.update(
+                {
+                    "Buy Broker": b["broker_code"],
+                    "Buy Type": participant_label(b["participant_type"]),
+                    "Buy Value": b["buy_value"],
+                    "Buy Lot": b["buy_lot"],
+                    "Buy Avg": b["buy_avg_price"],
+                }
+            )
+        else:
+            row.update({"Buy Broker": "", "Buy Type": "", "Buy Value": np.nan, "Buy Lot": np.nan, "Buy Avg": np.nan})
+        if i < len(sellers):
+            s = sellers.iloc[i]
+            row.update(
+                {
+                    "Sell Broker": s["broker_code"],
+                    "Sell Type": participant_label(s["participant_type"]),
+                    "Sell Value": s["sell_value"],
+                    "Sell Lot": s["sell_lot"],
+                    "Sell Avg": s["sell_avg_price"],
+                }
+            )
+        else:
+            row.update({"Sell Broker": "", "Sell Type": "", "Sell Value": np.nan, "Sell Lot": np.nan, "Sell Avg": np.nan})
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def build_screener(watchlist: list[str], as_of: pd.Timestamp, scan_df: pd.DataFrame, all_prices: pd.DataFrame, all_flow: pd.DataFrame, all_activity: pd.DataFrame) -> pd.DataFrame:
@@ -1080,7 +1325,8 @@ with overview_tab:
         if broker_summary.empty:
             st.caption("No broker rows for the selected date.")
         else:
-            st.dataframe(style_table(broker_summary, money_cols=["Net"]), use_container_width=True, hide_index=True, height=246)
+            st.caption("This table shows broker net buy or sell on the selected analysis date only.")
+            st.dataframe(style_table(broker_summary, money_cols=["Net on Analysis Date"]), use_container_width=True, hide_index=True, height=246)
 
         perf = analysis.price_performance_table(selected_ticker)
         if not perf.empty:
@@ -1131,6 +1377,7 @@ with flow_tab:
         selected_brokers = st.multiselect("Broker codes", broker_codes, default=default_selection, max_selections=max_selections)
     with c4:
         flow_mode = st.selectbox("Flow mode", ["Cumulative", "Daily"])
+    st.caption("Cumulative mode sums broker net flow across the selected broker window. Daily mode shows each date separately.")
     st.plotly_chart(interactive_broker_compare(activity_window, selected_brokers, flow_mode), use_container_width=True, config={"displayModeBar": True, "scrollZoom": True})
 
     left, right = st.columns([0.95, 1.05])
@@ -1155,11 +1402,83 @@ with flow_tab:
     with right:
         st.subheader("Broker Distribution")
         available_dist_dates = sorted(activity_window["date"].dt.date.unique().tolist())
-        dist_date = st.selectbox("Distribution date", available_dist_dates, index=len(available_dist_dates) - 1)
-        dist = analysis.broker_distribution_table(selected_ticker, trade_date=pd.Timestamp(dist_date), top_n=20)
+        d1, d2 = st.columns([0.8, 1.2])
+        with d1:
+            distribution_mode = st.selectbox("Distribution mode", ["Single day", "Date range"])
+        with d2:
+            if distribution_mode == "Single day":
+                dist_date = st.selectbox("Distribution date", available_dist_dates, index=len(available_dist_dates) - 1)
+                dist_start = pd.Timestamp(dist_date)
+                dist_end = pd.Timestamp(dist_date)
+            else:
+                default_start = available_dist_dates[max(0, len(available_dist_dates) - 5)]
+                range_value = st.date_input(
+                    "Distribution range",
+                    value=(default_start, available_dist_dates[-1]),
+                    min_value=available_dist_dates[0],
+                    max_value=available_dist_dates[-1],
+                )
+                if isinstance(range_value, tuple) and len(range_value) == 2:
+                    dist_start = pd.Timestamp(range_value[0])
+                    dist_end = pd.Timestamp(range_value[1])
+                else:
+                    dist_start = pd.Timestamp(available_dist_dates[-1])
+                    dist_end = pd.Timestamp(available_dist_dates[-1])
+
+        dist = activity_window[
+            (activity_window["date"] >= dist_start) & (activity_window["date"] <= dist_end)
+        ].copy()
+        if not dist.empty:
+            dist = (
+                dist.groupby(["broker_code", "participant_type"], dropna=False)
+                .agg(
+                    buy_value=("buy_value", "sum"),
+                    sell_value=("sell_value", "sum"),
+                    net_value=("net_value", "sum"),
+                    frequency=("frequency", "sum"),
+                    buy_lot=("buy_lot", "sum"),
+                    sell_lot=("sell_lot", "sum"),
+                    buy_avg_price=("buy_avg_price", "mean"),
+                    sell_avg_price=("sell_avg_price", "mean"),
+                )
+                .reset_index()
+            )
         if dist.empty:
-            st.caption("No distribution rows for this date.")
+            st.caption("No distribution rows for this date range.")
         else:
+            distribution_api = {}
+            try:
+                distribution_api = cached_broker_distribution_api(selected_ticker, dist_start, dist_end)
+            except Exception as exc:  # noqa: BLE001
+                distribution_api = {}
+                st.caption(f"Live distribution API unavailable for this date: {type(exc).__name__}. Falling back to estimated matching.")
+            if distribution_api:
+                st.caption("The flow chart below uses broker-to-broker distribution edges returned by the live API.")
+            else:
+                st.caption("Exact broker-to-broker counterparties are unavailable. The flow chart below falls back to estimated same-day matching based on broker net buy and sell totals.")
+            st.plotly_chart(
+                broker_distribution_sankey(dist, dist_end, distribution_data=distribution_api, top_n=8),
+                use_container_width=True,
+                config={"displayModeBar": True, "scrollZoom": True},
+            )
+            st.caption("Broker Summary")
+            summary_view = broker_summary_table(dist, distribution_data=distribution_api, top_n=10)
+            st.dataframe(
+                summary_view.style.format(
+                    {
+                        "Buy Value": fmt_rp,
+                        "Sell Value": fmt_rp,
+                        "Buy Lot": lambda v: "-" if pd.isna(v) else f"{float(v):,.1f}K" if abs(float(v)) >= 1_000 else f"{float(v):,.0f}",
+                        "Sell Lot": lambda v: "-" if pd.isna(v) else f"{float(v):,.1f}K" if abs(float(v)) >= 1_000 else f"{float(v):,.0f}",
+                        "Buy Avg": lambda v: "-" if pd.isna(v) else f"{float(v):,.0f}",
+                        "Sell Avg": lambda v: "-" if pd.isna(v) else f"{float(v):,.0f}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=320,
+            )
+            st.caption("Detailed broker rows")
             dist_view = dist[["broker_code", "participant_type", "buy_value", "sell_value", "net_value", "frequency"]].rename(
                 columns={
                     "broker_code": "Broker",
