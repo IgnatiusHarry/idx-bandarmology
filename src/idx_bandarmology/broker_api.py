@@ -472,11 +472,15 @@ def fetch_historical_broker_data(
             dates.append(current.isoformat())
         current += timedelta(days=1)
 
+    errors: list[str] = []
+
     def fetch_one(task: tuple[str, str]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         sym, iso = task
         try:
             md = _md_range(sym, iso, iso)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            if len(errors) < 8:
+                errors.append(f"{sym} {iso}: {type(exc).__name__}: {str(exc)[:140]}")
             return None, []
         flow = _flow_row(sym, md, iso, fetched_at)
         activity = _broker_activity_rows(sym, md, fetched_at) if flow else []
@@ -488,6 +492,10 @@ def fetch_historical_broker_data(
 
     flow_rows = [flow for flow, _activity in results if flow is not None]
     activity_rows = [row for _flow, activity in results for row in activity]
+    if errors and not flow_rows:
+        print("[broker_api] historical broker fetch returned no rows. Sample errors:")
+        for err in errors:
+            print(f"[broker_api]   {err}")
     flow_cols = [
         "date", "ticker", "bandar_signal", "bandar_signal_score",
         "foreign_net_broker", "local_net_broker", "gov_net_broker",

@@ -1,4 +1,4 @@
-"""Compact Streamlit dashboard for IDX broker-flow analysis."""
+"""Streamlit dashboard for IDX smart-money and broker-flow analysis."""
 
 from __future__ import annotations
 
@@ -10,24 +10,26 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 
-from idx_bandarmology import analysis, config, pipeline, storage
-import time  # noqa: E402
+from idx_bandarmology import analysis, pipeline, storage  # noqa: E402
 
 
 PROFILE_META = {
     "smart_foreign": ("Foreign Smart Money", "Directional foreign institutions"),
     "local_institutional": ("Local Institutions", "Local institution-like accounts"),
     "market_maker": ("Market Makers", "Active on both sides; net position matters"),
-    "bandar_gorengan": ("Speculative Operators", "Potential pump-and-dump participants"),
+    "bandar_gorengan": ("Speculative Operators", "Speculative operator profile"),
     "retail": ("Retail-Dominant", "Retail-heavy platforms"),
     "lainnya": ("Other Brokers", "Outside defined behavioral profiles"),
 }
 SMART_PROFILES = {"smart_foreign", "local_institutional"}
+ACC_SIGNALS = {"STRONG_ACCUMULATION", "ACCUMULATION", "NET_BUY", "AKUMULASI_KUAT", "AKUMULASI"}
+DIST_SIGNALS = {"STRONG_DISTRIBUTION", "DISTRIBUTION", "NET_SELL", "DISTRIBUSI_KUAT", "DISTRIBUSI"}
 
 
 def fmt_signal(value: object) -> str:
@@ -39,6 +41,13 @@ def fmt_signal(value: object) -> str:
         "DISTRIBUSI_KUAT": "Strong Distribution",
         "DISTRIBUSI": "Distribution",
         "NETRAL": "Neutral",
+        "STRONG_ACCUMULATION": "Strong Accumulation",
+        "ACCUMULATION": "Accumulation",
+        "NET_BUY": "Net Buy",
+        "STRONG_DISTRIBUTION": "Strong Distribution",
+        "DISTRIBUTION": "Distribution",
+        "NET_SELL": "Net Sell",
+        "NEUTRAL": "Neutral",
     }
     text = str(value)
     return mapping.get(text, text.replace("_", " ").title())
@@ -69,24 +78,58 @@ def participant_label(value: object) -> str:
     return {"Asing": "FOREIGN", "Lokal": "LOCAL", "Pemerintah": "GOV"}.get(str(value), str(value or "-"))
 
 
+def english_text(value: object) -> object:
+    if value is None or pd.isna(value):
+        return value
+    mapping = {
+        "Asing": "Foreign",
+        "Lokal": "Local",
+        "Pemerintah": "Government",
+        "AKUMULASI_KUAT": "Strong Accumulation",
+        "AKUMULASI": "Accumulation",
+        "DISTRIBUSI_KUAT": "Strong Distribution",
+        "DISTRIBUSI": "Distribution",
+        "NETRAL": "Neutral",
+    }
+    return mapping.get(str(value), value)
+
+
 def signed_color(value: float) -> str:
-    return "#10b981" if value >= 0 else "#e11d48"
+    return "#0f9f6e" if value >= 0 else "#dc3545"
+
+
+def score_tone(score: float) -> tuple[str, str]:
+    if score < 40:
+        return "negative", "#f43f5e"
+    if score <= 70:
+        return "warning", "#f59e0b"
+    return "positive", "#10b981"
 
 
 def price_at_or_before(price_df: pd.DataFrame, ts: pd.Timestamp) -> pd.Series | None:
     sub = price_df[price_df["date"] <= ts].sort_values("date")
-    if sub.empty:
-        return None
-    return sub.iloc[-1]
+    return None if sub.empty else sub.iloc[-1]
 
 
 def return_to_date(price_df: pd.DataFrame, ts: pd.Timestamp, periods: int) -> float | None:
     sub = price_df[price_df["date"] <= ts].sort_values("date")
     if len(sub) <= periods:
         return None
-    latest = sub.iloc[-1]["close"]
-    base = sub.iloc[-periods - 1]["close"]
+    latest = float(sub.iloc[-1]["close"])
+    base = float(sub.iloc[-periods - 1]["close"])
     return latest / base - 1 if base else None
+
+
+def flow_row_at(flow_df: pd.DataFrame, ticker: str, ts: pd.Timestamp) -> dict[str, object]:
+    sub = flow_df[(flow_df["ticker"] == ticker) & (flow_df["date"] <= ts)].sort_values("date")
+    return {} if sub.empty else sub.iloc[-1].to_dict()
+
+
+def latest_activity_date(activity_df: pd.DataFrame, ticker: str, ts: pd.Timestamp) -> pd.Timestamp | None:
+    sub = activity_df[(activity_df["ticker"] == ticker) & (activity_df["date"] <= ts)]
+    if sub.empty:
+        return None
+    return pd.Timestamp(sub["date"].max())
 
 
 def profile_flow_from_activity(activity: pd.DataFrame) -> pd.DataFrame:
@@ -104,17 +147,18 @@ def profile_flow_from_activity(activity: pd.DataFrame) -> pd.DataFrame:
         members = broker_rows[broker_rows["profile"] == profile].copy()
         if members.empty:
             continue
-        total_net = float(members["net"].sum())
         members["abs_net"] = members["net"].abs()
-        rows.append({
-            "profile": profile,
-            "label": label,
-            "description": desc,
-            "net": total_net,
-            "top_brokers": members.sort_values("abs_net", ascending=False).head(6)[
-                ["broker_code", "participant_type", "net"]
-            ].to_dict("records"),
-        })
+        rows.append(
+            {
+                "profile": profile,
+                "label": label,
+                "description": desc,
+                "net": float(members["net"].sum()),
+                "top_brokers": members.sort_values("abs_net", ascending=False)
+                .head(6)[["broker_code", "participant_type", "net"]]
+                .to_dict("records"),
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -131,11 +175,124 @@ def smart_daily_from_activity(activity: pd.DataFrame) -> pd.DataFrame:
     return daily
 
 
-def render_metric_card(label: str, value: str, note: str = "", tone: str = "neutral") -> None:
-    color = {"positive": "#10b981", "negative": "#e11d48", "warning": "#f59e0b"}.get(tone, "#e5e7eb")
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_causality(ticker: str) -> dict[str, object] | None:
+    return analysis.causality_foreign_vs_price(ticker, max_lags=5)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_broker_scan(tickers: tuple[str, ...], horizon: int, min_events: int, min_net_value: float) -> pd.DataFrame:
+    return analysis.broker_alpha_scan(
+        list(tickers),
+        horizon=horizon,
+        min_events=min_events,
+        min_net_value=min_net_value,
+        group_by=("ticker", "broker_code"),
+    )
+
+
+def label_component(signal: object) -> float:
+    raw = str(signal or "").upper()
+    if raw in {"AKUMULASI_KUAT", "STRONG_ACCUMULATION"}:
+        return 100
+    if raw in {"AKUMULASI", "ACCUMULATION", "NET_BUY"}:
+        return 80
+    if raw in {"NETRAL", "NEUTRAL"}:
+        return 50
+    if raw in {"DISTRIBUSI", "DISTRIBUTION", "NET_SELL"}:
+        return 25
+    if raw in {"DISTRIBUSI_KUAT", "STRONG_DISTRIBUTION"}:
+        return 0
+    return 40
+
+
+def p_value_component(p_value: float | None) -> float:
+    if p_value is None or pd.isna(p_value):
+        return 50
+    if p_value <= 0.01:
+        return 100
+    if p_value <= 0.05:
+        return 80
+    if p_value <= 0.10:
+        return 55
+    return 20
+
+
+def foreign_component(value: float | None) -> float:
+    if value is None or pd.isna(value):
+        return 50
+    if value > 0:
+        return 100
+    if value < 0:
+        return 0
+    return 50
+
+
+def broker_win_component(scan_df: pd.DataFrame, ticker: str) -> tuple[float, str]:
+    if scan_df.empty:
+        return 50, "No broker validation sample"
+    sub = scan_df[scan_df["ticker"] == ticker].copy() if "ticker" in scan_df.columns else scan_df.copy()
+    if sub.empty:
+        return 50, "No broker validation sample"
+    sub = sub.sort_values(["significant", "p_value_one_sided", "mean_fwd_return"], ascending=[False, True, False])
+    row = sub.iloc[0]
+    win_rate = float(row.get("win_rate", 0.5))
+    return max(0, min(100, win_rate * 100)), f"{row.get('broker_code', '-')} win rate {win_rate:.0%}"
+
+
+def conviction_score(signal: object, foreign_5d: float | None, scan_df: pd.DataFrame, ticker: str) -> dict[str, object]:
+    causality = cached_causality(ticker)
+    p_value = None if not causality else float(causality.get("min_p_value", np.nan))
+    p_score = p_value_component(p_value)
+    s_score = label_component(signal)
+    f_score = foreign_component(foreign_5d)
+    w_score, w_note = broker_win_component(scan_df, ticker)
+    score = (p_score * 0.30) + (s_score * 0.30) + (f_score * 0.20) + (w_score * 0.20)
+    return {
+        "score": round(float(score), 1),
+        "p_value": p_value,
+        "causality_component": p_score,
+        "signal_component": s_score,
+        "foreign_component": f_score,
+        "broker_component": w_score,
+        "broker_note": w_note,
+    }
+
+
+def contradiction_alerts(signal: object, ret_5d: float | None, ret_10d: float | None, foreign_5d: float | None, smart_cum: float | None) -> list[str]:
+    raw = str(signal or "").upper()
+    alerts = []
+    if raw in DIST_SIGNALS and ((ret_5d is not None and ret_5d > 0) or (ret_10d is not None and ret_10d > 0)):
+        alerts.append(
+            "Distribution while price is still rising — potential unfinished distribution or new buyer absorption. Monitor volume."
+        )
+    if raw in ACC_SIGNALS and ret_5d is not None and ret_5d < 0:
+        alerts.append("Accumulation signal with negative 5D return — accumulation may be early, failed, or absorbed by larger supply.")
+    if foreign_5d is not None and foreign_5d < 0 and raw in ACC_SIGNALS:
+        alerts.append("Aggregate accumulation conflicts with foreign net selling — check whether the move is driven by local brokers.")
+    if smart_cum is not None and smart_cum < 0 and raw in ACC_SIGNALS:
+        alerts.append("Signal is accumulation but smart-money cumulative flow is negative in the selected window.")
+    return alerts
+
+
+def broker_subtype(row: pd.Series) -> str:
+    if participant_label(row.get("Type") or row.get("participant_type")) != "FOREIGN":
+        return "-"
+    net = abs(float(row.get("Net", row.get("net_value", 0)) or 0))
+    freq = max(float(row.get("Freq", row.get("frequency", 0)) or 0), 1)
+    avg_value = net / freq
+    if avg_value >= 500_000_000 or (net >= 5_000_000_000 and freq <= 500):
+        return "Institutional"
+    if freq >= 2_000 or avg_value <= 100_000_000:
+        return "Speculative"
+    return "Mixed"
+
+
+def render_metric_card(label: str, value: str, note: str = "", tone: str = "neutral", title: str = "") -> None:
+    color = {"positive": "#0f9f6e", "negative": "#dc3545", "warning": "#b7791f"}.get(tone, "#94a3b8")
     st.markdown(
         f"""
-        <div class="metric-card">
+        <div class="metric-card" title="{escape(title)}" style="--accent:{color}">
             <div class="metric-label">{escape(label)}</div>
             <div class="metric-value" style="color:{color}">{escape(value)}</div>
             <div class="metric-note">{escape(note)}</div>
@@ -143,6 +300,34 @@ def render_metric_card(label: str, value: str, note: str = "", tone: str = "neut
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_page_header(ticker: str, analysis_ts: pd.Timestamp, window_start: pd.Timestamp, activity_date: pd.Timestamp | None) -> None:
+    data_date = activity_date.strftime("%Y-%m-%d") if activity_date is not None else "-"
+    st.markdown(
+        f"""
+        <div class="page-header">
+            <div>
+                <div class="eyebrow">IDX Broker Flow Research</div>
+                <div class="page-title">Smart Money Dashboard</div>
+            </div>
+            <div class="header-meta">
+                <span>{escape(ticker)}</span>
+                <span>Analysis {analysis_ts:%Y-%m-%d}</span>
+                <span>Broker data {escape(data_date)}</span>
+                <span>Window {window_start:%Y-%m-%d} to {analysis_ts:%Y-%m-%d}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_alerts(alerts: list[str]) -> None:
+    if not alerts:
+        return
+    html = "".join(f"<div>{escape(item)}</div>" for item in alerts)
+    st.markdown(f'<div class="alert-panel">{html}</div>', unsafe_allow_html=True)
 
 
 def render_verdict(text: str) -> None:
@@ -165,7 +350,7 @@ def render_profile_flow(profile_df: pd.DataFrame) -> None:
     html = ['<div class="profile-panel">']
     for row in profile_df.sort_values("net", ascending=False).itertuples():
         net = float(row.net)
-        width = max(2, min(100, abs(net) / max_abs * 100))
+        width = max(3, min(100, abs(net) / max_abs * 100))
         color = signed_color(net)
         chips = []
         for broker in row.top_brokers:
@@ -175,70 +360,22 @@ def render_profile_flow(profile_df: pd.DataFrame) -> None:
                 f'{escape(str(broker.get("broker_code", "-")))}'
                 f'<span>{escape(participant_label(broker.get("participant_type")))}</span>'
                 f'<b style="color:{signed_color(b_net)}">{escape(fmt_rp(b_net))}</b>'
-                '</span>'
+                "</span>"
             )
         html.append(
             '<div class="profile-row">'
             '<div class="profile-head">'
-            f'<div><b>{escape(row.label)}</b><small>{escape(row.description)}</small></div>'
+            f"<div><b>{escape(row.label)}</b><small>{escape(row.description)}</small></div>"
             f'<strong style="color:{color}">{escape(fmt_rp(net))}</strong>'
-            '</div>'
+            "</div>"
             '<div class="bar-track">'
             f'<div class="bar-fill" style="width:{width:.1f}%; background:{color};"></div>'
-            '</div>'
+            "</div>"
             f'<div class="chip-row">{"".join(chips)}</div>'
-            '</div>'
+            "</div>"
         )
     html.append("</div>")
     st.markdown("".join(html), unsafe_allow_html=True)
-
-
-def plot_price_context(price_df: pd.DataFrame, broker_df: pd.DataFrame, ticker: str, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> plt.Figure:
-    px = price_df[(price_df["date"] >= start_ts) & (price_df["date"] <= end_ts)].sort_values("date")
-    br = broker_df[(broker_df["date"] >= start_ts) & (broker_df["date"] <= end_ts)].sort_values("date")
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10.5, 5.2), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
-    if px.empty:
-        ax1.text(0.5, 0.5, "No price rows in selected broker window.", ha="center", va="center")
-        ax1.set_axis_off()
-        ax2.set_axis_off()
-        return fig
-    ax1.plot(px["date"], px["close"], color="#64748b", linewidth=1.8, label="Close")
-    if not br.empty:
-        overlay = px.merge(br[["date", "bandar_signal_score"]], on="date", how="inner")
-        colors = overlay["bandar_signal_score"].map({2: "#10b981", 1: "#84cc16", 0: "#94a3b8", -1: "#fb923c", -2: "#ef4444"}).fillna("#94a3b8")
-        ax1.scatter(overlay["date"], overlay["close"], c=colors, s=38, zorder=4, label="Signal date")
-        ax2.bar(overlay["date"], overlay["bandar_signal_score"], color=colors, width=1.2)
-    ax1.set_title(f"{ticker} price and broker-signal window")
-    ax1.grid(alpha=0.18)
-    ax1.legend(loc="upper left", fontsize=8)
-    ax2.axhline(0, color="#64748b", linewidth=0.8)
-    ax2.set_yticks([-2, -1, 0, 1, 2])
-    ax2.set_yticklabels(["Strong D", "D", "N", "A", "Strong A"], fontsize=8)
-    ax2.grid(alpha=0.15)
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    return fig
-
-
-def plot_smart_flow(daily: pd.DataFrame) -> plt.Figure:
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10.5, 4.2), sharex=True, gridspec_kw={"height_ratios": [2, 1]})
-    if daily.empty:
-        ax1.text(0.5, 0.5, "No smart-money flow in selected window.", ha="center", va="center")
-        ax1.set_axis_off()
-        ax2.set_axis_off()
-        return fig
-    colors = np.where(daily["smart_net"] >= 0, "#10b981", "#e11d48")
-    ax1.bar(daily["date"], daily["smart_net"] / 1e9, color=colors, width=0.8)
-    ax1.axhline(0, color="#64748b", linewidth=0.8)
-    ax1.set_ylabel("Daily net, Rp B")
-    ax1.grid(axis="y", alpha=0.15)
-    ax2.plot(daily["date"], daily["cumulative_net"] / 1e9, color="#38bdf8", linewidth=1.8)
-    ax2.axhline(0, color="#64748b", linewidth=0.8)
-    ax2.set_ylabel("Cumulative")
-    ax2.grid(axis="y", alpha=0.15)
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    return fig
 
 
 def style_table(df: pd.DataFrame, money_cols: list[str] | None = None, pct_cols: list[str] | None = None):
@@ -249,105 +386,521 @@ def style_table(df: pd.DataFrame, money_cols: list[str] | None = None, pct_cols:
     return df.style.format(fmt)
 
 
+def plot_price_context(price_df: pd.DataFrame, broker_df: pd.DataFrame, ticker: str, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> plt.Figure:
+    px = price_df[(price_df["date"] >= start_ts) & (price_df["date"] <= end_ts)].sort_values("date")
+    br = broker_df[(broker_df["date"] >= start_ts) & (broker_df["date"] <= end_ts)].sort_values("date")
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10.8, 4.05), sharex=True, gridspec_kw={"height_ratios": [3.1, 0.95]})
+    if px.empty:
+        ax1.text(0.5, 0.5, "No price rows in selected broker window.", ha="center", va="center")
+        ax1.set_axis_off()
+        ax2.set_axis_off()
+        return fig
+    ax1.plot(px["date"], px["close"], color="#2563eb", linewidth=1.8, label="Close")
+    ax1.axvline(start_ts, color="#b7791f", linewidth=1.0, linestyle="--", alpha=0.75, label="Broker window start")
+    signal_dates = set()
+    if not br.empty:
+        overlay = px.merge(br[["date", "bandar_signal", "bandar_signal_score"]], on="date", how="inner")
+        colors = overlay["bandar_signal_score"].map({2: "#0f9f6e", 1: "#65a30d", 0: "#94a3b8", -1: "#ea580c", -2: "#dc3545"}).fillna("#94a3b8")
+        ax1.scatter(overlay["date"], overlay["close"], c=colors, s=34, zorder=4, label="Signal date")
+        signal_dates = set(overlay[overlay["bandar_signal"].isin(ACC_SIGNALS)]["date"])
+    volume_colors = ["#0f9f6e" if d in signal_dates else "#cbd5e1" for d in px["date"]]
+    if "volume" in px.columns:
+        ax2.bar(px["date"], px["volume"].fillna(0) / 1e6, color=volume_colors, width=0.8)
+    ax1.set_title(f"{ticker} price, volume, and signal window")
+    ax1.set_ylabel("Close")
+    ax1.grid(alpha=0.18)
+    ax1.legend(loc="upper left", fontsize=8)
+    ax2.set_ylabel("Vol M")
+    ax2.grid(axis="y", alpha=0.15)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
+def plot_broker_compare(activity: pd.DataFrame, broker_codes: list[str], mode: str) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10.8, 3.65))
+    if activity.empty or not broker_codes:
+        ax.text(0.5, 0.5, "Select broker codes to display flow.", ha="center", va="center")
+        ax.set_axis_off()
+        return fig
+    sub = activity[activity["broker_code"].isin(broker_codes)].copy()
+    if sub.empty:
+        ax.text(0.5, 0.5, "No rows for selected broker codes.", ha="center", va="center")
+        ax.set_axis_off()
+        return fig
+    pivot = sub.pivot_table(index="date", columns="broker_code", values="net_value", aggfunc="sum").sort_index()
+    if mode == "Cumulative":
+        pivot = pivot.cumsum()
+    pivot = pivot / 1e9
+    for code in pivot.columns:
+        ax.plot(pivot.index, pivot[code], marker="o", linewidth=2, label=code)
+    ax.axhline(0, color="#64748b", linewidth=0.9)
+    ax.set_ylabel("Net value, Rp B")
+    ax.set_title("Broker flow comparison")
+    ax.grid(alpha=0.16)
+    ax.legend(loc="best", fontsize=8)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
+def plot_smart_flow(daily: pd.DataFrame) -> plt.Figure:
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10.8, 3.45), sharex=True, gridspec_kw={"height_ratios": [2, 0.9]})
+    if daily.empty:
+        ax1.text(0.5, 0.5, "No smart-money flow in selected window.", ha="center", va="center")
+        ax1.set_axis_off()
+        ax2.set_axis_off()
+        return fig
+    colors = np.where(daily["smart_net"] >= 0, "#0f9f6e", "#dc3545")
+    ax1.bar(daily["date"], daily["smart_net"] / 1e9, color=colors, width=0.8)
+    ax1.axhline(0, color="#64748b", linewidth=0.8)
+    ax1.set_ylabel("Daily net, Rp B")
+    ax1.grid(axis="y", alpha=0.15)
+    ax2.plot(daily["date"], daily["cumulative_net"] / 1e9, color="#2563eb", linewidth=1.8)
+    ax2.axhline(0, color="#64748b", linewidth=0.8)
+    ax2.set_ylabel("Cumulative")
+    ax2.grid(axis="y", alpha=0.15)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
+def plot_event_ribbon(event_table: pd.DataFrame, horizons: tuple[int, ...], show_individual: bool) -> plt.Figure:
+    xs = [0, *horizons]
+    fig, ax = plt.subplots(figsize=(10.8, 3.85))
+    if event_table.empty:
+        ax.text(0.5, 0.5, "No accumulation events in this window.", ha="center", va="center")
+        ax.set_axis_off()
+        return fig
+    cols = [f"t_plus_{h}d" for h in xs]
+    values = event_table[cols].apply(pd.to_numeric, errors="coerce")
+    median = values.median()
+    q25 = values.quantile(0.25)
+    q75 = values.quantile(0.75)
+    mean_plus_5 = values["t_plus_5d"].mean() if "t_plus_5d" in values.columns else values.iloc[:, -1].mean()
+    color = "#0f9f6e" if mean_plus_5 >= 100 else "#dc3545"
+    if show_individual:
+        for row in values.itertuples(index=False):
+            ax.plot(xs, list(row), color="#64748b", alpha=0.28, linewidth=1)
+    ax.fill_between(xs, q25.values, q75.values, color=color, alpha=0.22, label="25-75 percentile")
+    ax.plot(xs, median.values, color=color, linewidth=3, marker="o", label="Median path")
+    ax.axhline(100, color="#94a3b8", linestyle="--", linewidth=0.9)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(["Signal", *[f"+{h}d" for h in horizons]])
+    ax.set_ylabel("Normalized price")
+    ax.set_title("Event study ribbon, signal date = 100")
+    ax.grid(alpha=0.16)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def plotly_layout(fig: go.Figure, height: int, title: str | None = None) -> go.Figure:
+    fig.update_layout(
+        title=title,
+        height=height,
+        margin=dict(l=18, r=18, t=38 if title else 16, b=22),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        font=dict(family="Inter, Arial, sans-serif", color="#334155", size=12),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11)),
+    )
+    fig.update_xaxes(showgrid=False, linecolor="#d9e2ec", tickfont=dict(color="#64748b"))
+    fig.update_yaxes(gridcolor="#edf2f7", linecolor="#d9e2ec", tickfont=dict(color="#64748b"))
+    return fig
+
+
+def interactive_price_context(price_df: pd.DataFrame, broker_df: pd.DataFrame, ticker: str, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> go.Figure:
+    px = price_df[(price_df["date"] >= start_ts) & (price_df["date"] <= end_ts)].sort_values("date")
+    br = broker_df[(broker_df["date"] >= start_ts) & (broker_df["date"] <= end_ts)].sort_values("date")
+    fig = go.Figure()
+    if px.empty:
+        return plotly_layout(fig, 390, "No price rows in selected broker window")
+    overlay = px.merge(br[["date", "bandar_signal", "bandar_signal_score"]], on="date", how="left") if not br.empty else px.copy()
+    overlay["Signal"] = overlay.get("bandar_signal", pd.Series(index=overlay.index)).map(fmt_signal)
+    signal_color = overlay.get("bandar_signal_score", pd.Series(index=overlay.index)).map(
+        {2: "#0f9f6e", 1: "#65a30d", 0: "#94a3b8", -1: "#ea580c", -2: "#dc3545"}
+    ).fillna("#94a3b8")
+    signal_series = overlay["bandar_signal"] if "bandar_signal" in overlay.columns else pd.Series("", index=overlay.index)
+    volume_color = np.where(signal_series.isin(ACC_SIGNALS), "#0f9f6e", "#cbd5e1")
+
+    fig.add_bar(
+        x=px["date"],
+        y=px["volume"].fillna(0) / 1e6 if "volume" in px.columns else np.zeros(len(px)),
+        name="Volume, M",
+        marker_color=volume_color,
+        opacity=0.36,
+        yaxis="y2",
+        hovertemplate="%{x|%Y-%m-%d}<br>Volume: %{y:.2f}M<extra></extra>",
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=px["date"],
+            y=px["close"],
+            mode="lines",
+            name="Close",
+            line=dict(color="#2563eb", width=2),
+            hovertemplate="%{x|%Y-%m-%d}<br>Close: Rp %{y:,.0f}<extra></extra>",
+        )
+    )
+    if not br.empty:
+        signal_rows = overlay[overlay["bandar_signal"].notna()].copy()
+        fig.add_trace(
+            go.Scatter(
+                x=signal_rows["date"],
+                y=signal_rows["close"],
+                mode="markers",
+                name="Signal",
+                marker=dict(color=signal_color.loc[signal_rows.index], size=8, line=dict(width=1, color="#ffffff")),
+                customdata=np.stack([signal_rows["Signal"], signal_rows["bandar_signal_score"].fillna(0)], axis=-1),
+                hovertemplate="%{x|%Y-%m-%d}<br>Close: Rp %{y:,.0f}<br>Signal: %{customdata[0]}<br>Score: %{customdata[1]}<extra></extra>",
+            )
+        )
+    fig.add_shape(
+        type="line",
+        x0=start_ts,
+        x1=start_ts,
+        y0=0,
+        y1=1,
+        yref="paper",
+        line=dict(color="#b7791f", width=1, dash="dash"),
+    )
+    fig.update_layout(
+        yaxis=dict(title="Close"),
+        yaxis2=dict(title="Volume M", overlaying="y", side="right", showgrid=False),
+        barmode="overlay",
+    )
+    return plotly_layout(fig, 405, f"{ticker} Price, Volume, and Signal Context")
+
+
+def interactive_broker_compare(activity: pd.DataFrame, broker_codes: list[str], mode: str) -> go.Figure:
+    fig = go.Figure()
+    if activity.empty or not broker_codes:
+        return plotly_layout(fig, 350, "Select broker codes to display flow")
+    sub = activity[activity["broker_code"].isin(broker_codes)].copy()
+    if sub.empty:
+        return plotly_layout(fig, 350, "No rows for selected broker codes")
+    pivot = sub.pivot_table(index="date", columns="broker_code", values="net_value", aggfunc="sum").sort_index()
+    if mode == "Cumulative":
+        pivot = pivot.cumsum()
+    pivot = pivot / 1e9
+    line_width = 2 if len(pivot.columns) <= 5 else 1.35
+    marker_size = 6 if len(pivot.columns) <= 5 else 4
+    for code in pivot.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=pivot.index,
+                y=pivot[code],
+                mode="lines+markers",
+                name=code,
+                line=dict(width=line_width),
+                marker=dict(size=marker_size),
+                hovertemplate=f"{code}<br>%{{x|%Y-%m-%d}}<br>Net: Rp %{{y:.2f}}B<extra></extra>",
+            )
+        )
+    fig.add_hline(y=0, line_width=1, line_color="#94a3b8")
+    fig.update_yaxes(title="Net Value, Rp B")
+    return plotly_layout(fig, 360, "Broker Flow Comparison")
+
+
+def interactive_smart_flow(daily: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    if daily.empty:
+        return plotly_layout(fig, 320, "No smart-money flow in selected window")
+    colors = np.where(daily["smart_net"] >= 0, "#0f9f6e", "#dc3545")
+    fig.add_bar(
+        x=daily["date"],
+        y=daily["smart_net"] / 1e9,
+        name="Daily Net",
+        marker_color=colors,
+        hovertemplate="%{x|%Y-%m-%d}<br>Daily Net: Rp %{y:.2f}B<extra></extra>",
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=daily["date"],
+            y=daily["cumulative_net"] / 1e9,
+            mode="lines+markers",
+            name="Cumulative Net",
+            yaxis="y2",
+            line=dict(color="#2563eb", width=2),
+            hovertemplate="%{x|%Y-%m-%d}<br>Cumulative: Rp %{y:.2f}B<extra></extra>",
+        )
+    )
+    fig.add_hline(y=0, line_width=1, line_color="#94a3b8")
+    fig.update_layout(
+        yaxis=dict(title="Daily, Rp B"),
+        yaxis2=dict(title="Cumulative, Rp B", overlaying="y", side="right", showgrid=False),
+    )
+    return plotly_layout(fig, 330, "Smart-Money Daily Flow")
+
+
+def interactive_event_ribbon(event_table: pd.DataFrame, horizons: tuple[int, ...], show_individual: bool) -> go.Figure:
+    xs = [0, *horizons]
+    fig = go.Figure()
+    if event_table.empty:
+        return plotly_layout(fig, 360, "No accumulation events in this window")
+    cols = [f"t_plus_{h}d" for h in xs]
+    values = event_table[cols].apply(pd.to_numeric, errors="coerce")
+    median = values.median()
+    q25 = values.quantile(0.25)
+    q75 = values.quantile(0.75)
+    mean_plus_5 = values["t_plus_5d"].mean() if "t_plus_5d" in values.columns else values.iloc[:, -1].mean()
+    color = "#0f9f6e" if mean_plus_5 >= 100 else "#dc3545"
+    x_labels = ["Signal", *[f"+{h}D" for h in horizons]]
+    if show_individual:
+        for idx, row in event_table.iterrows():
+            fig.add_trace(
+                go.Scatter(
+                    x=x_labels,
+                    y=[row[col] for col in cols],
+                    mode="lines",
+                    line=dict(color="#94a3b8", width=1),
+                    opacity=0.25,
+                    showlegend=False,
+                    hovertemplate=f"{row.get('ticker', '')} | {pd.Timestamp(row.get('signal_date')).date()}<br>%{{x}}: %{{y:.2f}}<extra></extra>",
+                )
+            )
+    fig.add_trace(go.Scatter(x=x_labels, y=q75.values, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+    fig.add_trace(
+        go.Scatter(
+            x=x_labels,
+            y=q25.values,
+            mode="lines",
+            fill="tonexty",
+            fillcolor="rgba(15,159,110,0.18)" if color == "#0f9f6e" else "rgba(220,53,69,0.16)",
+            line=dict(width=0),
+            name="25-75 percentile",
+            hovertemplate="%{x}<br>25th pct: %{y:.2f}<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x_labels,
+            y=median.values,
+            mode="lines+markers",
+            name="Median Path",
+            line=dict(color=color, width=3),
+            hovertemplate="%{x}<br>Median: %{y:.2f}<extra></extra>",
+        )
+    )
+    fig.add_hline(y=100, line_width=1, line_dash="dash", line_color="#94a3b8")
+    fig.update_yaxes(title="Normalized Price")
+    return plotly_layout(fig, 365, "Event Study Ribbon, Signal Date = 100")
+
+
+def sparkline_values(activity: pd.DataFrame, broker_code: str, end_ts: pd.Timestamp, days: int = 5) -> str:
+    sub = activity[(activity["broker_code"] == broker_code) & (activity["date"] <= end_ts)].sort_values("date").tail(days)
+    if sub.empty:
+        return "-----"
+    chars = []
+    for value in sub["net_value"].fillna(0):
+        chars.append("+" if value > 0 else "-" if value < 0 else "0")
+    return "".join(chars)
+
+
+def top_broker_compact_table(top_buy: pd.DataFrame, top_sell: pd.DataFrame, activity: pd.DataFrame, end_ts: pd.Timestamp) -> pd.DataFrame:
+    rows = []
+    for side, df in (("Buy", top_buy.head(3)), ("Sell", top_sell.head(3))):
+        for row in df.itertuples():
+            rows.append(
+                {
+                    "Side": side,
+                    "Broker": row.broker_code,
+                    "Type": participant_label(row.participant_type),
+                    "Net": row.net_value,
+                    "5D Flow": sparkline_values(activity, row.broker_code, end_ts),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def profile_compact_table(profile_df: pd.DataFrame) -> pd.DataFrame:
+    if profile_df.empty:
+        return pd.DataFrame()
+    out = profile_df[["label", "net"]].copy()
+    out = out.sort_values("net", ascending=False).head(6)
+    out = out.rename(columns={"label": "Profile", "net": "Net"})
+    return out.reset_index(drop=True)
+
+
+def profile_broker_detail_table(activity: pd.DataFrame, profile_key: str | None = None) -> pd.DataFrame:
+    if activity.empty:
+        return pd.DataFrame()
+    df = activity.copy()
+    df["Profile Key"] = df["broker_code"].map(analysis.broker_profile_of)
+    if profile_key:
+        df = df[df["Profile Key"] == profile_key]
+    if df.empty:
+        return pd.DataFrame()
+    grouped = (
+        df.groupby(["Profile Key", "broker_code", "participant_type"], dropna=False)
+        .agg(
+            Buy=("buy_value", "sum"),
+            Sell=("sell_value", "sum"),
+            Net=("net_value", "sum"),
+            Freq=("frequency", "sum"),
+            Days=("date", "nunique"),
+        )
+        .reset_index()
+    )
+    grouped["Profile"] = grouped["Profile Key"].map(lambda key: PROFILE_META.get(key, (key, ""))[0])
+    grouped["Broker"] = grouped["broker_code"]
+    grouped["Type"] = grouped["participant_type"].map(participant_label)
+    grouped["Avg Value / Tx"] = grouped.apply(lambda r: abs(float(r["Net"] or 0)) / max(float(r["Freq"] or 0), 1), axis=1)
+    grouped = grouped.sort_values(["Profile", "Net"], ascending=[True, False])
+    return grouped[["Profile", "Broker", "Type", "Buy", "Sell", "Net", "Freq", "Days", "Avg Value / Tx"]].reset_index(drop=True)
+
+
+def build_screener(watchlist: list[str], as_of: pd.Timestamp, scan_df: pd.DataFrame, all_prices: pd.DataFrame, all_flow: pd.DataFrame, all_activity: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for ticker in watchlist:
+        flow_row = flow_row_at(all_flow, ticker, as_of)
+        act_date = latest_activity_date(all_activity, ticker, as_of)
+        if not flow_row or act_date is None:
+            continue
+        px = all_prices[all_prices["ticker"] == ticker]
+        flow_sub = all_flow[(all_flow["ticker"] == ticker) & (all_flow["date"] <= as_of)].sort_values("date")
+        foreign_5d = float(flow_sub.tail(5)["foreign_net_broker"].fillna(0).sum()) if not flow_sub.empty else np.nan
+        buyers, _ = analysis.top_net_broker_summary(ticker, trade_date=act_date, top_n=1)
+        top_buyer = "-" if buyers.empty else str(buyers.iloc[0]["broker_code"])
+        ret_5d = return_to_date(px, as_of, 5)
+        conv = conviction_score(flow_row.get("bandar_signal"), foreign_5d, scan_df, ticker)
+        rows.append(
+            {
+                "Ticker": ticker,
+                "Signal": fmt_signal(flow_row.get("bandar_signal")),
+                "Conviction Score": conv["score"],
+                "Foreign Net (5D)": foreign_5d,
+                "Top Buyer": top_buyer,
+                "5D Return": ret_5d,
+                "Data Date": pd.Timestamp(flow_row.get("date")).date(),
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("Conviction Score", ascending=False).reset_index(drop=True)
+
+
 st.set_page_config(page_title="IDX Smart Money", layout="wide")
 
-plt.rcParams.update({
-    "figure.facecolor": "#ffffff",
-    "axes.facecolor": "#ffffff",
-    "savefig.facecolor": "#ffffff",
-    "axes.edgecolor": "#dee2e6",
-    "axes.labelcolor": "#6c757d",
-    "axes.titlecolor": "#212529",
-    "xtick.color": "#6c757d",
-    "ytick.color": "#6c757d",
-    "grid.color": "#f8f9fa",
-    "text.color": "#212529",
-    "legend.facecolor": "#ffffff",
-    "legend.edgecolor": "#dee2e6",
-    "legend.labelcolor": "#212529",
-    "font.family": "sans-serif",
-    "font.sans-serif": ["Inter", "Arial"],
-})
+plt.rcParams.update(
+    {
+        "figure.facecolor": "#ffffff",
+        "axes.facecolor": "#ffffff",
+        "savefig.facecolor": "#ffffff",
+        "axes.edgecolor": "#d9e2ec",
+        "axes.labelcolor": "#64748b",
+        "axes.titlecolor": "#111827",
+        "xtick.color": "#64748b",
+        "ytick.color": "#64748b",
+        "grid.color": "#e5e7eb",
+        "text.color": "#111827",
+        "legend.facecolor": "#ffffff",
+        "legend.edgecolor": "#d9e2ec",
+        "legend.labelcolor": "#111827",
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Inter", "Arial"],
+    }
+)
 
 st.markdown(
     """
-    
-    
-    
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-    
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     :root {
-      --bg: #ffffff; --panel: #ffffff; --panel2: #f8f9fa; --line: #e9ecef;
-      --muted: #6c757d; --text: #212529; --strong: #000000;
-      --green: #198754; --red: #dc3545; --blue: #0d6efd; --amber: #ffc107;
+      --bg: #ffffff; --sidebar: #f6f8fb; --panel: #ffffff; --panel2: #f8fafc; --line: #d9e2ec;
+      --muted: #64748b; --text: #334155; --strong: #111827;
+      --green: #0f9f6e; --red: #dc3545; --blue: #2563eb; --amber: #b7791f;
     }
-    html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] { 
-        background: var(--bg); 
-        color: var(--text); 
-        font-family: 'Inter', -apple-system, sans-serif;
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+      background: var(--bg); color: var(--text); font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
     }
-    .block-container { max-width: 1200px; padding-top: 2rem; padding-bottom: 2rem; }
-    [data-testid="stSidebar"] { background: #f8f9fa; border-right: 1px solid var(--line); }
-    h1 { font-family: 'Inter', -apple-system, sans-serif; font-weight: 600; font-size: 1.5rem !important; color: var(--strong); margin-bottom: 0 !important; }
-    h2, h3 { font-family: 'Inter', -apple-system, sans-serif; font-weight: 500; font-size: 1.1rem !important; color: var(--strong); margin-top: 1.5rem !important; border-bottom: 1px solid var(--line); padding-bottom: 0.2rem;}
-    [data-testid="stCaptionContainer"], small { color: var(--muted) !important; font-family: 'Inter', sans-serif; }
-    
-    /* Interactive Elements */
-    .stButton button { background: #ffffff; color: var(--text); border: 1px solid var(--line); border-radius: 4px; height: 2.2rem; font-weight: 500;}
-    .stButton button:hover { border-color: var(--text); color: var(--strong); background: #f8f9fa; }
-    
+    .block-container { max-width: 1260px; padding: 0.75rem 1.05rem 1.3rem; }
+    [data-testid="stSidebar"] { background: var(--sidebar); border-right: 1px solid var(--line); }
+    [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { font-size: 0.95rem !important; margin-bottom: 0.35rem !important; }
+    div[data-testid="stVerticalBlock"] { gap: 0.46rem; }
+    div[data-testid="column"] > div[data-testid="stVerticalBlock"] { gap: 0.42rem; }
+    h1 { font-size: 1.32rem !important; font-weight: 700 !important; color: var(--strong); letter-spacing: 0; margin-bottom: 0 !important; }
+    h2, h3 {
+      font-size: 0.95rem !important; font-weight: 700 !important; color: var(--strong); letter-spacing: 0;
+      margin-top: 0.38rem !important; margin-bottom: 0.28rem !important;
+    }
+    h3::after { content: ""; display: block; height: 1px; background: var(--line); margin-top: 0.32rem; opacity: 0.75; }
+    [data-testid="stCaptionContainer"], small, .metric-note { color: var(--muted) !important; }
+    .page-header {
+      display: flex; justify-content: space-between; align-items: flex-end; gap: 18px;
+      padding: 10px 13px; margin: 0 0 7px; background: #ffffff;
+      border: 1px solid var(--line); border-radius: 8px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    .eyebrow {
+      color: var(--blue); font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.12em; margin-bottom: 4px;
+    }
+    .page-title { color: var(--strong); font-size: 1.12rem; font-weight: 700; letter-spacing: 0; line-height: 1.2; }
+    .header-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 720px; }
+    .header-meta span {
+      color: var(--text); background: #f8fafc; border: 1px solid var(--line); border-radius: 999px;
+      padding: 3px 8px; font-size: 0.7rem; font-weight: 600;
+    }
+    .stButton button {
+      width: 100%; background: #ffffff; color: var(--text); border: 1px solid #cbd5e1;
+      border-radius: 6px; height: 2.2rem; font-weight: 650; font-size: 0.82rem;
+    }
+    .stButton button:hover { border-color: var(--blue); color: var(--strong); background: #f8fafc; }
     .stSelectbox [data-baseweb="select"] > div, .stTextInput [data-baseweb="input"] > div,
     .stNumberInput [data-baseweb="input"] > div, .stDateInput [data-baseweb="input"] > div,
     .stMultiSelect [data-baseweb="select"] > div {
-      background: #ffffff !important; border-color: var(--line) !important; border-radius: 4px !important; color: var(--text) !important; 
+      background: #ffffff !important; border-color: #cbd5e1 !important; border-radius: 6px !important; color: var(--text) !important;
+      min-height: 2.05rem !important;
     }
-    .stSelectbox [data-baseweb="select"] > div:hover { border-color: var(--muted) !important; }
-    
-    /* Tables and Cards */
-    [data-testid="stDataFrame"] { border: 1px solid var(--line); border-radius: 4px; overflow: hidden; background: #ffffff; }
-    
-    div[data-testid="stMetric"], .metric-card, .verdict-panel, .profile-panel {
-      background: #ffffff; border: 1px solid var(--line); border-radius: 4px; 
+    label p { color: var(--muted) !important; font-size: 0.78rem !important; font-weight: 650 !important; }
+    [data-testid="stDataFrame"] { border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--panel); }
+    .metric-card, .verdict-panel, .profile-panel, .alert-panel {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 7px;
     }
-    
-    div[data-testid="stMetric"] { padding: 12px; min-height: 70px; border-left: 3px solid var(--line); border-top: none; border-bottom: none; border-right: none; border-radius: 0; }
-    [data-testid="stMetricLabel"] { color: var(--muted); font-size: 0.75rem; font-weight: 500; text-transform: uppercase; }
-    [data-testid="stMetricValue"] { color: var(--strong); font-size: 1.2rem; font-weight: 600; font-variant-numeric: tabular-nums; }
-    
-    .metric-card { padding: 12px; min-height: 70px; display: flex; flex-direction: column; justify-content: space-between; border-left: 3px solid var(--line); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); border-radius: 4px;}
-    .metric-label, .panel-kicker { color: var(--muted); font-size: 0.7rem; font-weight: 500; text-transform: uppercase; margin-bottom: 6px; }
-    .metric-value { font-size: 1.2rem; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; color: var(--strong); }
-    .metric-note { color: var(--muted); font-size: 0.7rem; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    
-    .verdict-panel { padding: 16px; margin: 12px 0; background: #f8f9fa; border-left: 3px solid var(--text); border-top: 1px solid var(--line); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); border-radius: 4px;}
-    .verdict-text { line-height: 1.5; color: var(--text); font-size: 0.9rem; }
-    
-    .profile-panel { padding: 16px; border-radius: 4px; }
-    .profile-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
-    .profile-row:last-child { border-bottom: 0; padding-bottom: 0; }
-    .profile-row:first-child { padding-top: 0; }
+    .metric-card {
+      padding: 8px 10px; min-height: 62px; border-left: 3px solid var(--accent, var(--line));
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    .metric-label, .panel-kicker {
+      color: var(--muted); font-size: 0.61rem; font-weight: 750; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px;
+    }
+    .metric-value { font-size: 1.02rem; font-weight: 760; font-variant-numeric: tabular-nums; line-height: 1.15; }
+    .metric-note { font-size: 0.68rem; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .verdict-panel { padding: 9px 12px; margin: 6px 0 5px; background: #f8fafc; border-left: 3px solid var(--blue); }
+    .verdict-text { line-height: 1.38; color: var(--text); font-size: 0.84rem; }
+    .alert-panel { padding: 8px 11px; margin: 5px 0; color: #7c4a03; background: #fff8e6; border-color: #f2d18b; font-size: 0.82rem; }
+    .profile-panel { padding: 9px 12px; background: #ffffff; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
+    .profile-row { padding: 7px 0; border-bottom: 1px solid var(--line); }
+    .profile-row:last-child { border-bottom: 0; }
     .profile-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
-    .profile-head b { color: var(--strong); font-size: 0.9rem; font-weight: 600;}
-    .profile-head small { display: block; font-size: 0.75rem; margin-top: 2px; color: var(--muted); }
-    
-    .bar-track { height: 4px; background: var(--line); border-radius: 0; margin: 8px 0; overflow: hidden; }
-    .bar-fill { height: 100%; border-radius: 0; }
-    
+    .profile-head b { color: var(--strong); font-size: 0.88rem; }
+    .profile-head small { display: block; font-size: 0.72rem; margin-top: 2px; color: var(--muted); }
+    .bar-track { height: 4px; background: #e5e7eb; border-radius: 999px; margin: 6px 0; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 999px; }
     .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
-    .broker-chip { display: inline-flex; gap: 6px; align-items: center; padding: 2px 6px; background: #ffffff; border: 1px solid var(--line); border-radius: 4px; font-size: 0.7rem; color: var(--text); }
-    .broker-chip span { color: var(--muted); font-size: 0.6rem; border: 1px solid var(--line); border-radius: 2px; padding: 1px 3px; background: #f8f9fa; }
-    
-    /* Tabs */
-    div[data-testid="stTabs"] button { color: var(--muted); font-weight: 500; padding-bottom: 8px;}
-    div[data-testid="stTabs"] button[aria-selected="true"] { color: var(--strong); border-bottom-color: var(--text); border-bottom-width: 2px; }
-    div[data-testid="stTabs"] button:hover { color: var(--text); }
-    
-    hr { border-color: var(--line); margin: 1rem 0; }
+    .broker-chip {
+      display: inline-flex; gap: 6px; align-items: center; padding: 2px 7px; background: #f8fafc;
+      border: 1px solid var(--line); border-radius: 5px; font-size: 0.7rem; color: var(--text);
+    }
+    .broker-chip span { color: var(--muted); font-size: 0.58rem; border: 1px solid var(--line); border-radius: 3px; padding: 1px 4px; background: #ffffff; }
+    div[data-testid="stTabs"] [role="tablist"] { gap: 4px; border-bottom: 1px solid var(--line); }
+    div[data-testid="stTabs"] button {
+      color: var(--muted); font-weight: 700; padding: 6px 10px; border-radius: 6px 6px 0 0;
+      background: transparent; font-size: 0.86rem;
+    }
+    div[data-testid="stTabs"] button[aria-selected="true"] { color: var(--strong); background: #ffffff; border-bottom-color: var(--blue); border-bottom-width: 2px; }
+    hr { border-color: var(--line); margin: 0.45rem 0; }
+    @media (max-width: 640px) {
+      .block-container { padding: 0.85rem 0.7rem; }
+      .page-header { display: block; padding: 12px; }
+      .header-meta { justify-content: flex-start; margin-top: 10px; }
+      .metric-value { font-size: 1.05rem; }
+      .metric-note { white-space: normal; }
+    }
     </style>
-
-
-
     """,
     unsafe_allow_html=True,
 )
@@ -355,16 +908,28 @@ st.markdown(
 
 all_broker = storage.read_broker_flow()
 all_activity = storage.read_broker_activity()
-available_tickers = sorted(set(all_broker["ticker"].unique()).intersection(set(all_activity["ticker"].unique()))) if not all_broker.empty and not all_activity.empty else []
+all_prices = storage.read_prices()
+if not all_broker.empty:
+    all_broker["ticker"] = all_broker["ticker"].str.upper()
+if not all_activity.empty:
+    all_activity["ticker"] = all_activity["ticker"].str.upper()
+if not all_prices.empty:
+    all_prices["ticker"] = all_prices["ticker"].str.upper()
+
+available_tickers = (
+    sorted(set(all_broker["ticker"].unique()).intersection(set(all_activity["ticker"].unique())))
+    if not all_broker.empty and not all_activity.empty
+    else []
+)
 
 with st.sidebar:
-    st.header("Workspace")
+    st.header("Controls")
     if not available_tickers:
         st.warning("No ticker has both broker-flow and broker-activity history yet.")
         st.stop()
 
-    default_watchlist = ",".join(available_tickers)
-    watchlist_input = st.text_input("Universe", value=default_watchlist)
+    default_universe = ",".join(available_tickers)
+    watchlist_input = st.text_input("Universe", value=default_universe)
     watchlist = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
     watchlist = [t for t in watchlist if t in available_tickers]
     if not watchlist:
@@ -373,32 +938,58 @@ with st.sidebar:
 
     selected_ticker = st.selectbox("Ticker", watchlist)
     ticker_dates = sorted(all_activity[all_activity["ticker"] == selected_ticker]["date"].dt.date.unique().tolist())
+    latest_broker_date = max(ticker_dates) if ticker_dates else None
+    ticker_price_dates = sorted(all_prices[all_prices["ticker"] == selected_ticker]["date"].dt.date.unique().tolist())
+    latest_price_date = max(ticker_price_dates) if ticker_price_dates else None
+    if latest_broker_date:
+        st.caption(f"Latest broker data: {latest_broker_date}")
+    if latest_price_date and latest_price_date != latest_broker_date:
+        st.caption(f"Latest price data: {latest_price_date}")
+    if latest_broker_date and latest_broker_date < date.today():
+        st.warning("Today is not available until broker-flow data is fetched and stored.")
     analysis_date = st.selectbox("Analysis date", ticker_dates, index=len(ticker_dates) - 1)
     analysis_ts = pd.Timestamp(analysis_date)
-
-    lookback_days = st.selectbox("Window", [20, 30, 60, 90, 180], index=2, format_func=lambda x: f"{x} calendar days")
-    horizon = st.selectbox("Validation horizon", [1, 3, 5, 10], index=3, format_func=lambda x: f"{x} trading days")
+    lookback_label = st.selectbox("Broker window", ["20 calendar days", "30 calendar days", "60 calendar days", "90 calendar days", "180 calendar days"], index=2)
+    lookback_days = int(lookback_label.split()[0])
+    horizon_label = st.selectbox("Validation horizon", ["1 trading day", "3 trading days", "5 trading days", "10 trading days"], index=3)
+    horizon = int(horizon_label.split()[0])
     min_events = st.number_input("Min broker events", min_value=3, max_value=30, value=5, step=1)
     min_net_buy_b = st.number_input("Min net buy, Rp B", min_value=0.0, value=0.0, step=0.5)
 
     st.divider()
-    if st.button("Run latest pipeline", use_container_width=True):
+    if st.button("Run latest pipeline to today"):
         result = pipeline.run(watchlist)
-        st.success(f"Stored {result['n_broker']} flow rows and {result.get('n_activity', 0)} activity rows.")
-        st.rerun()
-
-    backfill_range = st.date_input("Backfill range", value=(date.today() - timedelta(days=90), date.today()))
-    if st.button("Backfill broker history", use_container_width=True):
-        if isinstance(backfill_range, tuple) and len(backfill_range) == 2:
-            result = pipeline.backfill_broker_history(watchlist, backfill_range[0], backfill_range[1], refresh_prices=True)
+        if result["n_broker"] == 0:
+            st.error("No broker-flow rows were stored. Check whether the Stockbit/BROKER_API_TOKEN is still valid or whether the upstream endpoint has data.")
+        else:
             st.success(f"Stored {result['n_broker']} flow rows and {result.get('n_activity', 0)} activity rows.")
             st.rerun()
 
+    if latest_broker_date and latest_broker_date < date.today():
+        missing_start = latest_broker_date + timedelta(days=1)
+        if st.button(f"Fetch missing broker dates ({missing_start} to {date.today()})"):
+            result = pipeline.backfill_broker_history(watchlist, missing_start, date.today(), refresh_prices=True)
+            if result["n_broker"] == 0:
+                st.error("No missing broker rows were stored. The broker API returned no usable rows; refresh the Stockbit token or try again after broker data is published.")
+            else:
+                st.success(f"Stored {result['n_broker']} flow rows and {result.get('n_activity', 0)} activity rows.")
+                st.rerun()
+
+    backfill_range = st.date_input("Historical backfill range", value=(date.today() - timedelta(days=90), date.today()))
+    if st.button("Backfill broker history"):
+        if isinstance(backfill_range, tuple) and len(backfill_range) == 2:
+            result = pipeline.backfill_broker_history(watchlist, backfill_range[0], backfill_range[1], refresh_prices=True)
+            if result["n_broker"] == 0:
+                st.error("No broker rows were stored for that range. The broker API returned no usable rows; refresh the Stockbit token or check the selected dates.")
+            else:
+                st.success(f"Stored {result['n_broker']} flow rows and {result.get('n_activity', 0)} activity rows.")
+                st.rerun()
+
 
 window_start = analysis_ts - pd.Timedelta(days=lookback_days)
-price_df = storage.read_prices([selected_ticker])
-broker_df = storage.read_broker_flow([selected_ticker])
-activity_df = storage.read_broker_activity([selected_ticker])
+price_df = all_prices[all_prices["ticker"] == selected_ticker].copy()
+broker_df = all_broker[all_broker["ticker"] == selected_ticker].copy()
+activity_df = all_activity[all_activity["ticker"] == selected_ticker].copy()
 
 price_window = price_df[(price_df["date"] >= window_start) & (price_df["date"] <= analysis_ts)].copy()
 broker_window = broker_df[(broker_df["date"] >= window_start) & (broker_df["date"] <= analysis_ts)].copy()
@@ -409,216 +1000,333 @@ if broker_window.empty or activity_window.empty:
     st.stop()
 
 px_row = price_at_or_before(price_df, analysis_ts)
-signal_row_df = broker_df[broker_df["date"] == analysis_ts].copy()
-signal_row = signal_row_df.iloc[-1].to_dict() if not signal_row_df.empty else {}
-top_buy, top_sell = analysis.top_net_broker_summary(selected_ticker, trade_date=analysis_ts, top_n=6)
+signal_row = flow_row_at(broker_df, selected_ticker, analysis_ts)
+activity_date = latest_activity_date(activity_df, selected_ticker, analysis_ts)
+top_buy, top_sell = analysis.top_net_broker_summary(selected_ticker, trade_date=activity_date, top_n=6)
 daily_smart = smart_daily_from_activity(activity_window)
 profile_df = profile_flow_from_activity(activity_window)
-scan_10d = analysis.broker_alpha_scan([selected_ticker], horizon=10, min_events=5, min_net_value=0, group_by=("ticker", "broker_code"))
-scan_h = analysis.broker_alpha_scan([selected_ticker], horizon=horizon, min_events=int(min_events), min_net_value=float(min_net_buy_b) * 1e9, group_by=("ticker", "broker_code"))
-sig_10d = scan_10d[scan_10d["significant"].eq(True)].copy() if not scan_10d.empty else pd.DataFrame()
+scan_h = cached_broker_scan(tuple(watchlist), horizon, int(min_events), float(min_net_buy_b) * 1e9)
+scan_10d = cached_broker_scan((selected_ticker,), 10, 5, 0.0)
 
-close_value = px_row["close"] if px_row is not None else np.nan
+close_value = float(px_row["close"]) if px_row is not None and pd.notna(px_row["close"]) else np.nan
 ret_5d = return_to_date(price_df, analysis_ts, 5)
 ret_10d = return_to_date(price_df, analysis_ts, 10)
+foreign_5d = float(broker_window.sort_values("date").tail(5)["foreign_net_broker"].fillna(0).sum())
 smart_cum = float(daily_smart["cumulative_net"].iloc[-1]) if not daily_smart.empty else np.nan
 top_buyer = top_buy.iloc[0] if not top_buy.empty else None
 top_seller = top_sell.iloc[0] if not top_sell.empty else None
+conviction = conviction_score(signal_row.get("bandar_signal"), foreign_5d, scan_10d, selected_ticker)
+score_value = float(conviction["score"])
+score_tone_name, score_color = score_tone(score_value)
+alerts = contradiction_alerts(signal_row.get("bandar_signal"), ret_5d, ret_10d, foreign_5d, smart_cum)
 
+sig_10d = scan_10d[scan_10d["significant"].eq(True)].copy() if not scan_10d.empty else pd.DataFrame()
 if sig_10d.empty:
     verdict = (
-        f"{selected_ticker} has {fmt_pct(ret_5d)} over 5D and {fmt_pct(ret_10d)} over 10D. "
-        "Recent accumulation is visible, but no broker-specific 10D pattern clears the statistical filter yet."
+        f"{selected_ticker} shows {fmt_signal(signal_row.get('bandar_signal'))} with {fmt_pct(ret_5d)} over 5D and "
+        f"{fmt_pct(ret_10d)} over 10D. The current read is directional, but broker-specific 10D validation is not yet statistically strong."
     )
 else:
     best = sig_10d.sort_values(["p_value_one_sided", "mean_fwd_return"], ascending=[True, False]).iloc[0]
     verdict = (
-        f"{selected_ticker} has {fmt_pct(ret_5d)} over 5D and {fmt_pct(ret_10d)} over 10D. "
-        f"Broker {best['broker_code']} is the strongest historical 10D signal: "
+        f"{selected_ticker} shows {fmt_signal(signal_row.get('bandar_signal'))}. Broker {best['broker_code']} is the strongest 10D validation: "
         f"{int(best['n_events'])} events, mean return {fmt_pct(best['mean_fwd_return'])}, "
         f"win rate {best['win_rate']:.0%}, p-value {best['p_value_one_sided']:.4f}."
     )
 
-st.title("IDX Smart Money")
-st.caption(f"{selected_ticker} | analysis date {analysis_ts:%Y-%m-%d} | broker-history window {window_start:%Y-%m-%d} to {analysis_ts:%Y-%m-%d}")
+render_page_header(selected_ticker, analysis_ts, window_start, activity_date)
 
-k1, k2, k3, k4, k5 = st.columns(5)
+breakdown = (
+    f"Granger p-value component: {conviction['causality_component']:.0f}/100 "
+    f"(p={conviction['p_value'] if conviction['p_value'] is not None and pd.notna(conviction['p_value']) else 'n/a'}); "
+    f"Signal component: {conviction['signal_component']:.0f}/100; "
+    f"Foreign 5D component: {conviction['foreign_component']:.0f}/100; "
+    f"Broker win-rate component: {conviction['broker_component']:.0f}/100 ({conviction['broker_note']})."
+)
+
+k1, k2, k3, k4, k5, k6 = st.columns(6)
 with k1:
-    render_metric_card("Close", f"Rp {close_value:,.0f}" if pd.notna(close_value) else "-", f"as of {analysis_ts:%Y-%m-%d}")
+    render_metric_card("Conviction Score", f"{score_value:.1f}/100", "weighted model", score_tone_name, breakdown)
 with k2:
-    render_metric_card("5D return", fmt_pct(ret_5d), "price window", "positive" if (ret_5d or 0) >= 0 else "negative")
+    render_metric_card("Signal", fmt_signal(signal_row.get("bandar_signal")), "selected date")
 with k3:
-    render_metric_card("10D return", fmt_pct(ret_10d), "price window", "positive" if (ret_10d or 0) >= 0 else "negative")
+    render_metric_card("5D Return", fmt_pct(ret_5d), "price context", "positive" if (ret_5d or 0) >= 0 else "negative")
 with k4:
-    render_metric_card("Aggregate signal", fmt_signal(signal_row.get("bandar_signal")), "selected date")
+    render_metric_card("Foreign Net 5D", fmt_rp(foreign_5d), "broker summary", "positive" if foreign_5d >= 0 else "negative")
 with k5:
-    render_metric_card("Smart cumulative", fmt_rp(smart_cum), f"{len(daily_smart)} broker days", "positive" if (smart_cum or 0) >= 0 else "negative")
+    render_metric_card("Top Buyer", str(top_buyer["broker_code"]) if top_buyer is not None else "-", fmt_rp(top_buyer["net_value"]) if top_buyer is not None else "", "positive")
+with k6:
+    render_metric_card("Smart Cumulative", fmt_rp(smart_cum), f"{len(daily_smart)} broker days", "positive" if (smart_cum or 0) >= 0 else "negative")
 
+render_alerts(alerts)
 render_verdict(verdict)
 
-overview_tab, flow_tab, causality_tab, validation_tab, raw_tab = st.tabs(["Overview", "Broker Flow", "Causality Insight", "Validation", "Raw Tables"])
+overview_tab, flow_tab, causality_tab, validation_tab, screener_tab, raw_tab = st.tabs(
+    ["Overview", "Broker Flow", "Causality Insight", "Validation", "Screener", "Raw Tables"]
+)
 
 with overview_tab:
-    left, right = st.columns([1.25, 1])
+    left, right = st.columns([1.55, 0.95])
     with left:
-        st.subheader("Price and signal context")
-        st.pyplot(plot_price_context(price_df, broker_df, selected_ticker, window_start, analysis_ts), use_container_width=True)
+        st.subheader("Price, Volume, and Signal Context")
+        st.plotly_chart(
+            interactive_price_context(price_df, broker_df, selected_ticker, window_start, analysis_ts),
+            use_container_width=True,
+            config={"displayModeBar": True, "scrollZoom": True},
+        )
     with right:
-        st.subheader("Selected-date broker summary")
-        cols = st.columns(2)
-        with cols[0]:
-            render_metric_card("Top net buyer", str(top_buyer["broker_code"]) if top_buyer is not None else "-", fmt_rp(top_buyer["net_value"]) if top_buyer is not None else "", "positive")
-        with cols[1]:
-            render_metric_card("Top net seller", str(top_seller["broker_code"]) if top_seller is not None else "-", fmt_rp(top_seller["net_value"]) if top_seller is not None else "", "negative")
-        buyers_view = top_buy[["broker_code", "participant_type", "net_value"]].rename(columns={"broker_code": "Broker", "participant_type": "Type", "net_value": "Net"})
-        sellers_view = top_sell[["broker_code", "participant_type", "net_value"]].rename(columns={"broker_code": "Broker", "participant_type": "Type", "net_value": "Net"})
-        for df in (buyers_view, sellers_view):
-            if not df.empty:
-                df["Type"] = df["Type"].map(participant_label)
-        btab, stab = st.tabs(["Net Buy", "Net Sell"])
-        with btab:
-            st.dataframe(style_table(buyers_view, money_cols=["Net"]), use_container_width=True, hide_index=True)
-        with stab:
-            st.dataframe(style_table(sellers_view, money_cols=["Net"]), use_container_width=True, hide_index=True)
+        st.subheader("Top Brokers")
+        broker_summary = top_broker_compact_table(top_buy, top_sell, activity_df, analysis_ts)
+        if broker_summary.empty:
+            st.caption("No broker rows for the selected date.")
+        else:
+            st.dataframe(style_table(broker_summary, money_cols=["Net"]), use_container_width=True, hide_index=True, height=246)
 
-    st.subheader("Broker profile flow")
-    render_profile_flow(profile_df)
+        perf = analysis.price_performance_table(selected_ticker)
+        if not perf.empty:
+            st.caption("Price Performance")
+            perf = perf[perf["timeframe"].isin(["1D", "1W", "1M", "3M", "6M", "YTD"])]
+            perf_view = perf.rename(columns={"timeframe": "Period", "return": "Return"})
+            st.dataframe(style_table(perf_view, pct_cols=["Return"]), use_container_width=True, hide_index=True, height=142)
+
+    lower_left, lower_right = st.columns([1.1, 0.9])
+    with lower_left:
+        st.subheader("Smart-Money Daily Flow")
+        st.plotly_chart(interactive_smart_flow(daily_smart), use_container_width=True, config={"displayModeBar": True, "scrollZoom": True})
+    with lower_right:
+        st.subheader("Profile Net Flow")
+        profile_view = profile_compact_table(profile_df)
+        if profile_view.empty:
+            st.caption("No profile flow for this window.")
+        else:
+            st.dataframe(style_table(profile_view, money_cols=["Net"]), use_container_width=True, hide_index=True, height=246)
+            with st.expander("Broker detail by profile", expanded=False):
+                detail_view = profile_broker_detail_table(activity_window)
+                st.dataframe(
+                    style_table(detail_view, money_cols=["Buy", "Sell", "Net", "Avg Value / Tx"]),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=320,
+                )
 
 with flow_tab:
-    left, right = st.columns([1.45, 1])
+    st.subheader("Broker Drill-Down")
+    broker_codes = sorted(activity_window["broker_code"].dropna().unique().tolist())
+    ranked_codes = (
+        activity_window.assign(abs_net=activity_window["net_value"].abs())
+        .groupby("broker_code")["abs_net"]
+        .sum()
+        .sort_values(ascending=False)
+        .index.tolist()
+    )
+    default_codes = ranked_codes[:3] if ranked_codes else broker_codes[:3]
+    c1, c2, c3, c4 = st.columns([0.8, 0.9, 1.7, 0.9])
+    with c1:
+        compare_mode = st.toggle("Compare mode", value=True)
+    with c2:
+        max_brokers = st.selectbox("Max brokers", [3, 5, 8, 12, "All"], index=1)
+    with c3:
+        max_selections = None if max_brokers == "All" else int(max_brokers)
+        default_selection = default_codes[: min(len(default_codes), max_selections or len(default_codes))]
+        selected_brokers = st.multiselect("Broker codes", broker_codes, default=default_selection, max_selections=max_selections)
+    with c4:
+        flow_mode = st.selectbox("Flow mode", ["Cumulative", "Daily"])
+    st.plotly_chart(interactive_broker_compare(activity_window, selected_brokers, flow_mode), use_container_width=True, config={"displayModeBar": True, "scrollZoom": True})
+
+    left, right = st.columns([0.95, 1.05])
     with left:
-        st.subheader("Smart-money daily flow")
-        st.pyplot(plot_smart_flow(daily_smart), use_container_width=True)
+        st.subheader("Broker Profile Flow")
+        render_profile_flow(profile_df)
+        profile_options = ["All Profiles"] + [row["label"] for _, row in profile_df.iterrows()] if not profile_df.empty else ["All Profiles"]
+        selected_profile_label = st.selectbox("Profile detail", profile_options)
+        selected_profile_key = None
+        if selected_profile_label != "All Profiles" and not profile_df.empty:
+            selected_profile_key = profile_df[profile_df["label"] == selected_profile_label]["profile"].iloc[0]
+        detail_view = profile_broker_detail_table(activity_window, selected_profile_key)
+        if detail_view.empty:
+            st.caption("No broker detail for this profile.")
+        else:
+            st.dataframe(
+                style_table(detail_view, money_cols=["Buy", "Sell", "Net", "Avg Value / Tx"]),
+                use_container_width=True,
+                hide_index=True,
+                height=360,
+            )
     with right:
-        st.subheader("Price performance")
-        perf = analysis.price_performance_table(selected_ticker)
-        perf = perf[perf["timeframe"].isin(["1D", "1W", "1M", "3M", "6M", "YTD", "1Y", "3Y"])]
-        pcols = st.columns(2)
-        for i, (_idx, row) in enumerate(perf.iterrows()):
-            value = row["return"]
-            tone = "positive" if pd.notna(value) and value >= 0 else "negative"
-            with pcols[i % 2]:
-                render_metric_card(str(row["timeframe"]), fmt_pct(value), "", tone)
-
-    st.subheader("Broker distribution on selected date")
-    dist = analysis.broker_distribution_table(selected_ticker, trade_date=analysis_ts, top_n=20)
-    if dist.empty:
-        st.caption("No distribution rows for this date.")
-    else:
-        dist_view = dist[["broker_code", "participant_type", "buy_value", "sell_value", "net_value", "frequency"]].rename(columns={
-            "broker_code": "Broker", "participant_type": "Type", "buy_value": "Buy", "sell_value": "Sell", "net_value": "Net", "frequency": "Freq",
-        })
-        dist_view["Type"] = dist_view["Type"].map(participant_label)
-        st.dataframe(style_table(dist_view, money_cols=["Buy", "Sell", "Net"]), use_container_width=True, hide_index=True)
-
+        st.subheader("Broker Distribution")
+        available_dist_dates = sorted(activity_window["date"].dt.date.unique().tolist())
+        dist_date = st.selectbox("Distribution date", available_dist_dates, index=len(available_dist_dates) - 1)
+        dist = analysis.broker_distribution_table(selected_ticker, trade_date=pd.Timestamp(dist_date), top_n=20)
+        if dist.empty:
+            st.caption("No distribution rows for this date.")
+        else:
+            dist_view = dist[["broker_code", "participant_type", "buy_value", "sell_value", "net_value", "frequency"]].rename(
+                columns={
+                    "broker_code": "Broker",
+                    "participant_type": "Type",
+                    "buy_value": "Buy",
+                    "sell_value": "Sell",
+                    "net_value": "Net",
+                    "frequency": "Freq",
+                }
+            )
+            dist_view["Type"] = dist_view["Type"].map(participant_label)
+            dist_view["Avg Value / Tx"] = dist_view.apply(lambda r: abs(float(r["Net"] or 0)) / max(float(r["Freq"] or 0), 1), axis=1)
+            dist_view["Sub-type"] = dist_view.apply(broker_subtype, axis=1)
+            st.dataframe(style_table(dist_view, money_cols=["Buy", "Sell", "Net", "Avg Value / Tx"]), use_container_width=True, hide_index=True)
 
 with causality_tab:
-    st.subheader("Causality Insight (Granger Causality)")
-    st.markdown("This causality test measures whether the activity of certain participants **precedes** and **predicts** the stock's price movement in the following days. (P-value < 0.05 means significant).")
-    
-    with st.spinner("Calculating causality..."):
-        c_cols = st.columns([1, 1.5])
-        
-        with c_cols[0]:
-            st.markdown("### Foreign Net Flow vs Price")
-            foreign_causality = analysis.causality_foreign_vs_price(selected_ticker, max_lags=5)
-            if foreign_causality:
-                if foreign_causality['is_significant']:
-                    render_metric_card("Foreign Influence", "Significant", f"P-value: {foreign_causality['min_p_value']:.4f} at lag {foreign_causality['best_lag']}", "positive")
-                    st.success("There is statistical evidence that Foreign net flow drives this stock's price.")
-                else:
-                    render_metric_card("Foreign Influence", "Not Significant", f"Min p-value: {foreign_causality['min_p_value']:.4f}", "neutral")
-                    st.info("Foreign net flow does not show a strong causal effect on price returns.")
-            else:
-                st.caption("Insufficient data to calculate aggregate foreign causality.")
+    st.subheader("Causality Insight")
+    foreign_causality = cached_causality(selected_ticker)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if foreign_causality:
+            render_metric_card(
+                "Foreign Flow Granger",
+                "Significant" if foreign_causality["is_significant"] else "Not Significant",
+                f"p={foreign_causality['min_p_value']:.4f}, lag {foreign_causality['best_lag']}",
+                "positive" if foreign_causality["is_significant"] else "warning",
+            )
+        else:
+            render_metric_card("Foreign Flow Granger", "Unavailable", "insufficient observations", "warning")
+    with c2:
+        render_metric_card("Conviction Model", f"{score_value:.1f}/100", "hover score card for formula", score_tone_name)
+    with c3:
+        render_metric_card("Broker Validation", conviction["broker_note"], "historical forward returns")
 
-            st.markdown("### Participant Type")
-            part_causality = analysis.causality_by_participant(selected_ticker, max_lags=5)
-            if not part_causality.empty:
-                part_view = part_causality.rename(columns={"participant_type": "Participant", "best_lag": "Lag", "p_value": "P-Value", "significant": "Sig."})
-                st.dataframe(
-                    part_view.style.format({"P-Value": "{:.4f}"}).applymap(lambda x: 'background-color: #064e3b; color: #a7f3d0' if x is True else '', subset=["Sig."]),
-                    use_container_width=True, hide_index=True
-                )
-            else:
-                st.caption("Insufficient data.")
-
-        with c_cols[1]:
-            st.markdown("### Top Brokers Causality")
-            broker_causality = analysis.causality_by_broker(selected_ticker, top_n=15, max_lags=5)
-            if not broker_causality.empty:
-                sig_brokers = broker_causality[broker_causality["significant"]]
-                if not sig_brokers.empty:
-                    st.success(f"Found {len(sig_brokers)} brokers whose movement significantly precedes the stock price.")
-                else:
-                    st.warning("No dominant broker's movement predicts the stock price in this window.")
-                    
-                b_view = broker_causality.rename(columns={"broker_code": "Broker", "best_lag": "Lag", "p_value": "P-Value", "significant": "Sig."})
-                st.dataframe(
-                    b_view.style.format({"P-Value": "{:.4f}"}).applymap(lambda x: 'background-color: #064e3b; color: #a7f3d0' if x is True else '', subset=["Sig."]),
-                    use_container_width=True, hide_index=True
-                )
-            else:
-                st.caption("Insufficient data to calculate individual broker causality.")
-
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Participant Type")
+        part_causality = analysis.causality_by_participant(selected_ticker, max_lags=5)
+        if part_causality.empty:
+            st.caption("Insufficient participant history.")
+        else:
+            part_view = part_causality.rename(
+                columns={"participant_type": "Participant", "best_lag": "Lag", "p_value": "P Value", "significant": "Significant"}
+            )
+            part_view["Participant"] = part_view["Participant"].map(english_text)
+            st.dataframe(part_view.style.format({"P Value": "{:.4f}"}), use_container_width=True, hide_index=True)
+    with right:
+        st.subheader("Top Broker Causality")
+        broker_causality = analysis.causality_by_broker(selected_ticker, top_n=15, max_lags=5)
+        if broker_causality.empty:
+            st.caption("Insufficient broker history.")
+        else:
+            broker_view = broker_causality.rename(
+                columns={"broker_code": "Broker", "best_lag": "Lag", "p_value": "P Value", "significant": "Significant"}
+            )
+            st.dataframe(broker_view.style.format({"P Value": "{:.4f}"}), use_container_width=True, hide_index=True)
 
 with validation_tab:
-    st.subheader("Broker-specific return validation")
+    st.subheader("Broker-Specific Return Validation")
     if scan_h.empty:
         st.caption("No broker passes the current validation settings.")
     else:
-        view = scan_h[[
-            "broker_code", "n_events", "mean_fwd_return", "median_fwd_return",
-            "win_rate", "avg_net_value", "total_net_value", "p_value_one_sided", "significant", "status",
-        ]].rename(columns={
-            "broker_code": "Broker", "n_events": "Events", "mean_fwd_return": "Mean Return",
-            "median_fwd_return": "Median Return", "win_rate": "Win Rate", "avg_net_value": "Avg Net Buy",
-            "total_net_value": "Total Net Buy", "p_value_one_sided": "P Value", "significant": "Significant", "status": "Status",
-        })
-        st.dataframe(
-            view.style.format({
-                "Mean Return": "{:+.2%}", "Median Return": "{:+.2%}", "Win Rate": "{:.0%}",
-                "Avg Net Buy": "Rp {:,.0f}", "Total Net Buy": "Rp {:,.0f}", "P Value": "{:.4f}",
-            }),
-            use_container_width=True,
-            hide_index=True,
+        view = scan_h[
+            [
+                "ticker",
+                "broker_code",
+                "n_events",
+                "mean_fwd_return",
+                "median_fwd_return",
+                "win_rate",
+                "avg_net_value",
+                "total_net_value",
+                "p_value_one_sided",
+                "significant",
+            ]
+        ].rename(
+            columns={
+                "ticker": "Ticker",
+                "broker_code": "Broker",
+                "n_events": "Events",
+                "mean_fwd_return": "Mean Return",
+                "median_fwd_return": "Median Return",
+                "win_rate": "Win Rate",
+                "avg_net_value": "Avg Net Buy",
+                "total_net_value": "Total Net Buy",
+                "p_value_one_sided": "P Value",
+                "significant": "Significant",
+            }
         )
+        st.dataframe(style_table(view, money_cols=["Avg Net Buy", "Total Net Buy"], pct_cols=["Mean Return", "Median Return", "Win Rate"]), use_container_width=True, hide_index=True)
 
-    st.subheader("Accumulation event study")
+    st.subheader("Accumulation Event Study")
+    show_individual = st.toggle("Show individual event paths", value=False)
     event_table = analysis.event_study_table(
         tickers=[selected_ticker],
         horizons=(1, 3, 5, 10),
         lookback_days=lookback_days,
-        signals=["STRONG_ACCUMULATION", "ACCUMULATION", "NET_BUY", "AKUMULASI_KUAT", "AKUMULASI"],
+        signals=list(ACC_SIGNALS),
     )
-    if event_table.empty:
-        st.caption("No accumulation events in this window.")
+    st.plotly_chart(
+        interactive_event_ribbon(event_table, horizons=(1, 3, 5, 10), show_individual=show_individual),
+        use_container_width=True,
+        config={"displayModeBar": True, "scrollZoom": True},
+    )
+    if not event_table.empty:
+        event_view = event_table.rename(
+            columns={
+                "ticker": "Ticker",
+                "signal_date": "Signal Date",
+                "bandar_signal": "Signal",
+                "bandar_signal_score": "Signal Score",
+                "t_plus_0d": "Signal Day",
+                "t_plus_1d": "+1D",
+                "t_plus_3d": "+3D",
+                "t_plus_5d": "+5D",
+                "t_plus_10d": "+10D",
+            }
+        )
+        event_view["Signal"] = event_view["Signal"].map(fmt_signal)
+        st.dataframe(event_view, use_container_width=True, hide_index=True)
+
+with screener_tab:
+    st.subheader("Multi-Ticker Screener")
+    only_acc = st.toggle("Show only Accumulation / Strong Accumulation", value=True)
+    screener = build_screener(watchlist, analysis_ts, scan_h, all_prices, all_broker, all_activity)
+    if only_acc and not screener.empty:
+        screener = screener[screener["Signal"].isin(["Accumulation", "Strong Accumulation", "Net Buy"])]
+    if screener.empty:
+        st.caption("No tickers match the current screener filter.")
     else:
-        st.pyplot(
-            analysis.plot_event_study(
-                tickers=[selected_ticker],
-                horizons=(1, 3, 5, 10),
-                lookback_days=lookback_days,
-                aggregate=False,
-                signals=["STRONG_ACCUMULATION", "ACCUMULATION", "NET_BUY", "AKUMULASI_KUAT", "AKUMULASI"],
-            ),
+        st.dataframe(
+            style_table(screener, money_cols=["Foreign Net (5D)"], pct_cols=["5D Return"]),
             use_container_width=True,
+            hide_index=True,
         )
 
 with raw_tab:
-    st.subheader("Window-level broker-flow rows")
-    flow_view = broker_window[["date", "bandar_signal", "bandar_signal_score", "foreign_net_broker", "local_net_broker", "total_value"]].rename(columns={
-        "date": "Date", "bandar_signal": "Signal", "bandar_signal_score": "Score",
-        "foreign_net_broker": "Foreign Net", "local_net_broker": "Local Net", "total_value": "Value",
-    })
+    st.subheader("Broker-Flow Rows")
+    flow_view = broker_window[
+        ["date", "bandar_signal", "bandar_signal_score", "foreign_net_broker", "local_net_broker", "total_value"]
+    ].rename(
+        columns={
+            "date": "Date",
+            "bandar_signal": "Signal",
+            "bandar_signal_score": "Score",
+            "foreign_net_broker": "Foreign Net",
+            "local_net_broker": "Local Net",
+            "total_value": "Value",
+        }
+    )
     flow_view["Signal"] = flow_view["Signal"].map(fmt_signal)
     st.dataframe(style_table(flow_view, money_cols=["Foreign Net", "Local Net", "Value"]), use_container_width=True, hide_index=True)
 
-    st.subheader("Window-level broker activity")
-    activity_view = activity_window[["date", "broker_code", "participant_type", "buy_value", "sell_value", "net_value", "frequency"]].rename(columns={
-        "date": "Date", "broker_code": "Broker", "participant_type": "Type",
-        "buy_value": "Buy", "sell_value": "Sell", "net_value": "Net", "frequency": "Freq",
-    })
+    st.subheader("Broker Activity Rows")
+    activity_view = activity_window[
+        ["date", "broker_code", "participant_type", "buy_value", "sell_value", "net_value", "frequency"]
+    ].rename(
+        columns={
+            "date": "Date",
+            "broker_code": "Broker",
+            "participant_type": "Type",
+            "buy_value": "Buy",
+            "sell_value": "Sell",
+            "net_value": "Net",
+            "frequency": "Freq",
+        }
+    )
     activity_view["Type"] = activity_view["Type"].map(participant_label)
     st.dataframe(style_table(activity_view, money_cols=["Buy", "Sell", "Net"]), use_container_width=True, hide_index=True)
 

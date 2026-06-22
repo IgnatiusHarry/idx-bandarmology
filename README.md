@@ -20,23 +20,38 @@ A single, end-to-end project that exercises the **full data lifecycle** — buil
 
 **Tech stack:** Python · pandas · NumPy · statsmodels · scikit-learn · SQLite · Streamlit · matplotlib · yfinance · Jupyter
 
-## Why this project?
+## The story behind this project
 
-Broker flow and "bandar detector" data are usually locked behind paid platforms and are hard to analyze systematically. This repo:
+It started with a question every Indonesian retail investor eventually asks: **does "smart money" really exist on the IDX, or is *bandarmology* just folklore?**
 
-1. Pulls real broker buy/sell, foreign/domestic flow, and accumulation/distribution signals from a private broker-data endpoint using your own token.
-2. Combines them with historical OHLCV prices from yfinance.
-3. Stores everything in SQLite as a lightweight analytics warehouse.
-4. Builds derived features for both historical and forward returns.
-5. Runs simple statistical and ML tests to see whether smart money signals are associated with returns.
-6. Exposes the same dataset in a Streamlit dashboard for quick review and sharing.
+I went looking with **BULL** (PT Buana Lintas Lautan). The fundamentals were already interesting — after taking delivery of its first LNG carrier (MT Gas Garuda, 145,914 CBM) in December 2025, BULL planned three more LNG vessels in H2 2026 (~US$125M capex) into a market expected to need 140–155 new LNG carriers by 2027, with sell-side targets implying meaningful upside.
+
+But the **data** was more interesting. My dashboard flagged BULL with an **Accumulation** signal, a **conviction score of 60.9/100**, and **+4.35% (5D) / +28.86% (10D)** forward returns — yet **foreign net flow was still negative.**
+
+That left one question:
+
+> **If the price is rising but foreign money isn't behind it, who is actually buying?**
+
+Rather than guess, I built a pipeline to track it broker-by-broker. One code stood out: **II**, with **more than Rp 105 B cumulative net buy** over the window — a patient accumulator that kept adding while others sold. Public broker-code references map **II → PT Danatama Makmur Sekuritas**, a firm with a *reported corporate affiliation* to BULL's controlling owners. (A broker code only identifies the executing firm, not the end client — this is a research lead, **not** an accusation.)
+
+That curiosity became this end-to-end project, following one loop:
+
+> **raw data → SQLite warehouse → dashboard → insight → testable hypothesis**
+
+- a **data pipeline** that collects, cleans, transforms and stores price + broker-flow data in SQLite;
+- a **Streamlit dashboard** that visualises price, accumulation/distribution, broker grouping and smart-money signals;
+- **feature engineering + statistical/ML validation** that tests whether broker accumulation is actually followed by forward returns.
+
+And the first real lesson it taught me: **the biggest broker is not the most predictive one.** On BULL, II was the most *persistent* buyer — but statistically a much smaller broker (**GA**) carried the stronger, significant forward-return signal. Both stories are in the case studies below.
+
+> Not financial advice and not a buy/sell recommendation — a data project and research case study.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     yf["yfinance<br/>(OHLCV prices)"] --> pipe
-    broker["Broker API<br/>(smart money)"] --> pipe
+    broker["Broker API<br/>(broker / smart money)"] --> pipe
     pipe["pipeline<br/>scrape → clean → store"] --> db[("SQLite<br/>analytics warehouse")]
     db --> consume["notebook /<br/>Streamlit dashboard"]
     db --> model["features → analysis →<br/>modeling + causality<br/>(OLS · logistic · random forest ·<br/>Granger causality · event study)"]
@@ -150,23 +165,23 @@ In the dashboard, **"Smart Money" = Foreign Smart Money + Local Institutions**. 
 
 ## Results
 
-Two worked examples, produced by the **same pipeline** against the same SQLite warehouse over **2026-03-31 → 2026-06-19**: **BBCA** (Bank Central Asia — the headline case) and **BULL** (PT Buana Lintas Lautan). Analysing any other stock is just a matter of changing the focused ticker.
+Three worked examples, produced by the **same pipeline** against the same SQLite warehouse: **BREN** (Barito Renewables — the statistically strongest case), **BULL** (PT Buana Lintas Lautan — the origin story above), and **BBCA** (Bank Central Asia). Analysing any other stock is just a matter of changing the focused ticker.
 
-### Headline case study — BBCA caught the June bottom
+### Headline case study — BREN has the strongest validated broker signal
 
-Bank Central Asia (**BBCA**) fell from about **Rp 6,350** in late April to a low near **Rp 4,850 around 2026-06-08** (down ~24%), then bounced back ~**30%** to ~Rp 6,300 by **2026-06-19**. In the chart, the top line is the share price and the coloured dots below are the daily verdict — **red = big players selling, green = big players buying**. The dots stayed red all the way down, then turned green right at the bottom, just before the rebound: here the signal *followed* the move instead of fighting it.
+**BREN** (Barito Renewables) is the cleanest *statistical* win in the warehouse. It is up **+31.54% over the past month**, and the dashboard tags it **Accumulation** — but the real headline sits in the **Validation** tab. Among every broker that has repeatedly net-bought BREN, foreign broker **BK** is the most statistically reliable accumulator: **13 net-buy events, a +21.59% average 10-day forward return, a 69% win rate, and p = 0.0122** (significant at the 5% level). That is exactly the signal this project was built to separate from noise.
 
-![BBCA price and broker-signal window](docs/screenshots/bbca_price_signal.png)
+![BREN overview — price, signal, top brokers and smart-money flow](docs/screenshots/bren_overview.png)
 
-Now follow the money. The bars show how much brokers bought (green) or sold (red) each day, and the line is the running total. Even though the price recovered, that line keeps sliding down — to roughly **−Rp 2.8 trillion** by 2026-06-19 — so across the whole period brokers were net **sellers**. On the last day, **foreign desks were buying (+Rp 43.62 B)** while **local desks were selling (−Rp 176.58 B)**: foreign money quietly stepping in while locals sold.
+The Overview reads top-to-bottom the way a desk would: the **price / volume / signal** chart, the day's **top net buyers and sellers** (here the three biggest buyers — **ZP, BK, AK** — are all *foreign* desks), recent **price performance** (+31.54% in a month), and the **smart-money daily flow** turning net-positive into the move.
 
-![BBCA daily and cumulative broker net flow](docs/screenshots/bbca_broker_flow.png)
+This is where the **broker grouping** earns its keep. Instead of leaving 40+ anonymous broker codes on the screen, the pipeline nets them into behavioral profiles, so you can see *which kind of money* is on each side:
 
-Does a "buy" signal actually pay off? This chart lines up every buy signal at the same starting point (day 0 = 100) and tracks the price afterwards. The strong-buy days (**2026-06-12 and 2026-06-15**) jumped **+5–8% within 1–3 days**, but the **average path** (dashed) drifts back down to about **−9% by day 10**. So it tends to give a quick bounce, not a lasting climb — a signal to act on fast, not to hold blindly.
+![BREN broker profile flow and distribution](docs/screenshots/bren_broker_profiles.png)
 
-![BBCA event study after accumulation signals](docs/screenshots/bbca_event_study.png)
+Over this window **Local Institutions** were the dominant net buyers (**+Rp 871 B**), with retail-heavy platforms adding **+Rp 245 B**, while **Market Makers (−Rp 417 B)** and **Foreign Smart Money (−Rp 564 B)** were net sellers — a reminder that an "Accumulation" tape can still have large foreign desks distributing underneath it. The point isn't a buy or sell call; it is that the same stock looks completely different once you split the flow by *who* is trading.
 
-### Second case — switch the ticker to BULL: when the aggregate signal misleads
+### BULL — when the aggregate signal misleads
 
 Point the same pipeline at **BULL** (243 price rows, 105 broker-flow rows, 3,353 broker-activity rows in this window) and it tells the *opposite* kind of story — one where the aggregate label fights the move and the real edge hides one level down, in individual broker behaviour.
 
@@ -218,6 +233,20 @@ A single day's snapshot of who bought (green) versus who sold (red), broker by b
 ![Broker distribution snapshot](docs/screenshots/broker_distribution.png)
 
 > Scope & reproducibility: these are a snapshot from the BULL analysis (2026-03-31 → 2026-06-19) produced by `notebooks/01_bandarmology_end_to_end.ipynb` and `dashboard/app.py` against the same SQLite warehouse. A short history, a small watchlist, and multiple-testing risk make these findings **exploratory, not production trading signals** — re-running on a longer history will shift the exact numbers. See the Disclaimer at the bottom.
+
+### Another example — BBCA caught the June bottom
+
+Switch the ticker to **BBCA** (Bank Central Asia) and the dashboard shows the *opposite* personality to BULL — a large, liquid blue-chip where the aggregate signal tracked the move instead of fighting it. BBCA fell from about **Rp 6,350** in late April to a low near **Rp 4,850 around 2026-06-08** (down ~24%), then bounced back ~**30%** to ~Rp 6,300 by **2026-06-19**. In the chart, the top line is the share price and the coloured dots below are the daily verdict — **red = big players selling, green = big players buying**. The dots stayed red all the way down, then turned green right at the bottom, just before the rebound.
+
+![BBCA price and broker-signal window](docs/screenshots/bbca_price_signal.png)
+
+Now follow the money. The bars show how much brokers bought (green) or sold (red) each day, and the line is the running total. Even though the price recovered, that line keeps sliding down — to roughly **−Rp 2.8 trillion** by 2026-06-19 — so across the whole period brokers were net **sellers**. On the last day, **foreign desks were buying (+Rp 43.62 B)** while **local desks were selling (−Rp 176.58 B)**: foreign money quietly stepping in while locals sold.
+
+![BBCA daily and cumulative broker net flow](docs/screenshots/bbca_broker_flow.png)
+
+Does a "buy" signal actually pay off? This chart lines up every buy signal at the same starting point (day 0 = 100) and tracks the price afterwards. The strong-buy days (**2026-06-12 and 2026-06-15**) jumped **+5–8% within 1–3 days**, but the **average path** (dashed) drifts back down to about **−9% by day 10**. So it tends to give a quick bounce, not a lasting climb — a signal to act on fast, not to hold blindly.
+
+![BBCA event study after accumulation signals](docs/screenshots/bbca_event_study.png)
 
 ### Upgraded dashboard: causality & broker-level validation
 
