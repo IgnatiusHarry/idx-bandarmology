@@ -110,17 +110,13 @@ Important: the broker-flow endpoint provides a latest snapshot, not a historical
 streamlit run dashboard/app.py
 ```
 
-The dashboard reads the same SQLite warehouse as the notebook, so both views stay in sync. Pick a **focused ticker**, lookback window, and forward-return horizon in the sidebar, then explore five tabs:
+The dashboard reads the same SQLite warehouse as the notebook, so both views stay in sync. From the sidebar you choose a **universe**, a **focused ticker**, an **analysis date**, a **lookback window**, and the **validation horizon** / **minimum-event** thresholds — and can trigger a fresh pipeline run or a historical backfill in place. Headline metric cards (close, 5D / 10D return, aggregate signal, smart-money cumulative flow) sit above five tabs:
 
-- **Overview** — focused-ticker diagnosis, top recent accumulators, model-supported brokers, an event study, and a market-wide snapshot of the accumulation/distribution signal, score, and foreign vs. local net flow for every ticker on the watchlist.
-- **Broker Flow** — per-broker profile flow, smart-money daily flow, price performance, single-day broker distribution, and cumulative broker net-flow over time plotted against price.
+- **Overview** — price-and-signal context chart for the focused ticker, the selected date's top net buyers and sellers, and the broker profile flow.
+- **Broker Flow** — smart-money cumulative daily flow, multi-timeframe price performance, and the single-day broker distribution.
 - **Causality Insight** — Granger-causality tests for whether foreign flow (in aggregate, by participant type, and broker-by-broker) statistically *leads* price.
-- **Validation** — the broker-specific return validation scan: every broker that repeatedly net-bought a ticker, ranked by the strength (t-stat) of its forward returns, with a significance filter.
+- **Validation** — the broker-specific return validation table (events, mean/median forward return, win rate, net buy, significance) plus an accumulation event-study chart.
 - **Raw Tables** — the underlying window-level broker-flow and broker-activity rows.
-
-![Dashboard overview — focused-ticker diagnosis and market-wide signal snapshot](docs/screenshots/dashboard_overview.png)
-
-The dashboard defaults to **historical returns**. If you switch to **forward returns**, the newest broker snapshot may still show blanks because future price rows do not exist yet.
 
 ## Results
 
@@ -173,18 +169,14 @@ Net buy (green) vs. net sell (red) by broker on a single day — the cross-secti
 
 > Scope & reproducibility: these are a snapshot from the BULL analysis (2026-03-31 → 2026-06-19) produced by `notebooks/01_bandarmology_end_to_end.ipynb` and `dashboard/app.py` against the same SQLite warehouse. A short history, a small watchlist, and multiple-testing risk make these findings **exploratory, not production trading signals** — re-running on a longer history will shift the exact numbers. See the Disclaimer at the bottom.
 
-### Upgraded pipeline: full-watchlist causality & broker validation
+### Upgraded dashboard: causality & broker-level validation
 
-The latest build extends the warehouse from a single stock to the **whole watchlist** — **5,286 price rows, 1,180 broker-flow rows, and 39,201 broker-activity rows** as of **2026-06-19** — and adds two new analytical layers on top of the event study above:
+The latest build grows the warehouse from a single stock toward the **full watchlist** and adds two analytical layers on top of the event study above, surfaced in the dashboard's **Causality Insight** and **Validation** tabs:
 
-- **Granger causality** (`statsmodels`): tests whether foreign flow *leads* price (in aggregate, by participant type, and broker-by-broker), instead of merely correlating with it on the same day.
-- **Broker-specific return validation** (`broker_alpha_scan`): for every broker that repeatedly net-bought a ticker, it measures the distribution of forward returns and ranks brokers by t-statistic, keeping only combinations with ≥5 events, a positive mean, and one-sided p < 0.05.
+- **Granger causality** (`statsmodels`): for the focused ticker it tests whether foreign net flow — in aggregate, by participant type, and broker-by-broker — *precedes and predicts* price over the next few days, rather than merely moving with it on the same day (p < 0.05 flags a significant lead).
+- **Broker-specific return validation** (`broker_alpha_scan`): for every broker that repeatedly net-bought the ticker it reports event count, mean/median forward return, win rate, and a one-sided significance test, applying the same "≥5 events, positive mean, p < 0.05" bar used in the BULL study above — now driven by a configurable horizon and minimum-event threshold.
 
-Across the full watchlist, **36 broker–ticker combinations** now pass that filter. The strongest are dominated by **BULL** — e.g. broker **LG** (28 events, +7.90% mean / +10.74% median 10-day return, 68% win rate, t = 3.63) and **GA** (11 events, +9.54% / +11.40%, 73% win rate, t = 3.44) — reinforcing the single-stock finding above that the real edge lives in *which* broker is accumulating, not the headline label.
-
-![Broker-specific return validation across the watchlist](docs/screenshots/broker_validation.png)
-
-**BBCA, live read (2026-06-19):** the market snapshot currently tags **BBCA** as **Accumulation** (score +1) with **foreign net +Rp 43.62 B** against **local net −Rp 176.58 B** — foreign money quietly accumulating into domestic selling. A full BBCA deep-dive (focused event study + broker-level validation) is the next addition as the dataset backfills further.
+**BBCA, latest read (2026-06-19):** the pipeline tags **BBCA** as **Accumulation** (signal score +1) with **foreign net +Rp 43.62 B** against **local net −Rp 176.58 B** — foreign money quietly accumulating into domestic selling. A full BBCA deep-dive (focused event study + broker-level validation), mirroring the BULL walkthrough above, is the next addition once a longer BBCA broker history is backfilled.
 
 ## Methodology
 
@@ -194,7 +186,7 @@ Across the full watchlist, **36 broker–ticker combinations** now pass that fil
 - **OLS regression**: checks whether signal variables have statistically significant relationships with returns.
 - **Classification models**: turn returns into a binary up/down target and report accuracy, precision, recall, and ROC-AUC.
 - **Granger causality**: tests whether lagged foreign flow improves the prediction of price beyond price's own history — a directional ("leads") check rather than a same-day correlation.
-- **Broker-specific validation**: ranks individual brokers by the t-statistic of the forward returns that follow their repeated net buying, flagging only statistically significant accumulators.
+- **Broker-specific validation**: ranks individual brokers by the statistical significance of the forward returns that follow their repeated net buying, flagging only accumulators that clear the one-sided test.
 
 With a short history and a small watchlist, results are exploratory rather than production-grade trading signals.
 
