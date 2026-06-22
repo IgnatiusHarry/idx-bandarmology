@@ -118,11 +118,29 @@ The dashboard reads the same SQLite warehouse as the notebook, so both views sta
 - **Validation** — the broker-specific return validation table (events, mean/median forward return, win rate, net buy, significance) plus an accumulation event-study chart.
 - **Raw Tables** — the underlying window-level broker-flow and broker-activity rows.
 
+**No Python install?** Open [`docs/dashboard-preview.html`](docs/dashboard-preview.html) for a static, self-contained gallery of the live dashboard's BBCA and BULL views.
+
 ## Results
 
-A worked example on **BULL** (PT Buana Lintas Lautan), backfilled over **2026-03-31 → 2026-06-19** (243 price rows, 105 broker-flow rows, 3,353 broker-activity rows).
+Two worked examples, produced by the **same pipeline** against the same SQLite warehouse over **2026-03-31 → 2026-06-19**: **BBCA** (Bank Central Asia — the headline case) and **BULL** (PT Buana Lintas Lautan). Analysing any other stock is just a matter of changing the focused ticker.
 
-### Headline: the aggregate signal can mislead
+### Headline case study — BBCA caught the June bottom
+
+Bank Central Asia (**BBCA**) sold off from ~Rp 6,350 in late April to a trough near **Rp 4,850 around 2026-06-08** (a ~24% drawdown), then rebounded ~**30%** to ~Rp 6,300 by **2026-06-19**. Through the whole decline the aggregate bandar signal printed **Distribution** (red); it then **flipped to Accumulation / Strong Accumulation** (green) right at the June low, just before the bounce. Here the headline signal *tracked* the move instead of fighting it.
+
+![BBCA price and broker-signal window](docs/screenshots/bbca_price_signal.png)
+
+The broker money flow adds a more cautious second layer. Cumulative broker net flow stayed **deeply negative** across the window — drifting to roughly **−Rp 2.8 trillion** by 2026-06-19 even as price recovered — punctuated by only brief green accumulation bursts (e.g. around 2026-05-22). On the final signal day, **foreign desks net bought (+Rp 43.62 B)** while **local desks net sold (−Rp 176.58 B)**: foreign money quietly accumulating into domestic selling.
+
+![BBCA daily and cumulative broker net flow](docs/screenshots/bbca_broker_flow.png)
+
+The event study keeps the finding honest. Individual accumulation events — especially the **Strong Accumulation** prints on 2026-06-12 and 2026-06-15 — popped **+5–8% within 1–3 days**. But the **average path** (dashed) only hovers near the signal level through +3 days before **fading to roughly −9% by +10 days**: the short-term bump is real, a durable 10-day edge is not. A signal to act on quickly, not to hold blindly.
+
+![BBCA event study after accumulation signals](docs/screenshots/bbca_event_study.png)
+
+### Second case — switch the ticker to BULL: when the aggregate signal misleads
+
+Point the same pipeline at **BULL** (243 price rows, 105 broker-flow rows, 3,353 broker-activity rows in this window) and it tells the *opposite* kind of story — one where the aggregate label fights the move and the real edge hides one level down, in individual broker behaviour.
 
 BULL rose **+17.18% over 5 days** and **+15.06% over 10 days** — while its *latest aggregate* "bandar" signal read **Strong Distribution** (i.e. bearish). The headline label was pointing the wrong way. The useful information was one level down, in **individual broker behaviour**.
 
@@ -176,7 +194,7 @@ The latest build grows the warehouse from a single stock toward the **full watch
 - **Granger causality** (`statsmodels`): for the focused ticker it tests whether foreign net flow — in aggregate, by participant type, and broker-by-broker — *precedes and predicts* price over the next few days, rather than merely moving with it on the same day (p < 0.05 flags a significant lead).
 - **Broker-specific return validation** (`broker_alpha_scan`): for every broker that repeatedly net-bought the ticker it reports event count, mean/median forward return, win rate, and a one-sided significance test, applying the same "≥5 events, positive mean, p < 0.05" bar used in the BULL study above — now driven by a configurable horizon and minimum-event threshold.
 
-**BBCA, latest read (2026-06-19):** the pipeline tags **BBCA** as **Accumulation** (signal score +1) with **foreign net +Rp 43.62 B** against **local net −Rp 176.58 B** — foreign money quietly accumulating into domestic selling. A full BBCA deep-dive (focused event study + broker-level validation), mirroring the BULL walkthrough above, is the next addition once a longer BBCA broker history is backfilled.
+Both layers run **per focused ticker** — the BBCA headline case and the BULL case above are produced by changing the **Ticker** selector and nothing else.
 
 ## Methodology
 
