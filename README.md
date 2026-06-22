@@ -212,7 +212,7 @@ Each line is one broker's running total of buying. A line that just keeps climbi
 
 ### Event study: what happens after an accumulation signal?
 
-Just like the BBCA version, this lines up every buy signal at day 0 (= 100) and tracks the price for the next 10 days, with the **average path** in black. For BULL the average stays **above 100** through the first 5 days — a short-lived bump after the buying, rather than a lasting trend.
+This lines up every buy signal at day 0 (= 100) and tracks the price for the next 10 days, with the **average path** in black. For BULL the average stays **above 100** through the first 5 days — a short-lived bump after the buying, rather than a lasting trend.
 
 ![Event study after signal dates](docs/screenshots/event_study.png)
 
